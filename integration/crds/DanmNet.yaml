@@ -25,10 +25,6 @@ spec:
             NetworkType:
               type: string
             Options:
-              required:
-              - container_prefix
-              - host_device
-              - rt_tables
               properties:
                 cidr:
                   type: string

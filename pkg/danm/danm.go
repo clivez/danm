@@ -6,6 +6,7 @@ import (
   "log"
   "net"
   "os"
+  "strconv"
   "strings"
   "encoding/json"
   "github.com/satori/go.uuid"
@@ -32,6 +33,7 @@ var (
   v1Endpoint = "/api/v1/"
   cniVersion = "0.3.1"
   kubeConf string
+  defaultNetworkName = "default"
 )
 
 type NetConf struct {
@@ -50,6 +52,7 @@ type K8sArgs struct {
 
 type cniArgs struct {
   nameSpace string
+  netns string
   podId string
   containerId string
   annotation map[string]string
@@ -65,14 +68,13 @@ func createInterfaces(args *skel.CmdArgs) error {
     return fmt.Errorf("CNI args cannot be loaded with error: %v", err)
   }
   log.Println("CNI ADD invoked with: ns:" + cniArgs.nameSpace + " PID:" + cniArgs.podId + " CID: " + cniArgs.containerId)
-  if err = fillAnnotationsAndLabels(cniArgs); err != nil {
-    log.Println("ERROR: ADD: Annotation could not be parsed with error:" + err.Error())
-    return fmt.Errorf("Annotation could not be parsed with error: %v", err)
+  if err = getPodAttributes(cniArgs); err != nil {
+    log.Println("ERROR: ADD: Pod manifest could not be parsed with error:" + err.Error())
+    return fmt.Errorf("Pod manifest could not be parsed with error: %v", err)
   }
   extractConnections(cniArgs)
-  if len(cniArgs.interfaces) == 0 {
-    log.Println("INFO: ADD: No networks in manifest of Pod:" + cniArgs.podId + "Danm invocation is skipped")
-    return types.PrintResult(&current.Result{}, cniVersion)
+  if len(cniArgs.interfaces) == 1 && cniArgs.interfaces[0].Network == defaultNetworkName {
+    log.Println("WARN: ADD: no network connections for Pod: " + cniArgs.podId + " are defined in spec.metadata.annotation. Falling back to use: " + defaultNetworkName)
   }
   cniResult, err := setupNetworking(cniArgs)
   if err != nil {
@@ -126,6 +128,7 @@ func extractCniArgs(args *skel.CmdArgs) (*cniArgs,error) {
     return nil,err
   }
   cmdArgs := cniArgs{string(kubeArgs.K8S_POD_NAMESPACE),
+                     args.Netns,
                      string(kubeArgs.K8S_POD_NAME),
                      string(kubeArgs.K8S_POD_INFRA_CONTAINER_ID),
                      nil,
@@ -136,18 +139,18 @@ func extractCniArgs(args *skel.CmdArgs) (*cniArgs,error) {
   return &cmdArgs, nil
 }
 
-func fillAnnotationsAndLabels(args *cniArgs) error {
+func getPodAttributes(args *cniArgs) error {
   confArgs, err := loadNetConf(args.stdIn)
   if err != nil {
     return errors.New("cannot load CNI NetConf due to error:" + err.Error())
   }
   k8sClient, err := createK8sClient(confArgs.Kubeconfig)
   if err != nil {
-    return errors.New("cannot create kube client due to error:" + err.Error())
+    return errors.New("cannot create K8s REST client due to error:" + err.Error())
   }
   pod, err := k8sClient.CoreV1().Pods(string(args.nameSpace)).Get(string(args.podId), meta_v1.GetOptions{})
   if err != nil {
-    return errors.New("failed to get pod info from API server due to:" + err.Error())
+    return errors.New("failed to get Pod info from K8s API server due to:" + err.Error())
   }
   args.annotation = pod.Annotations
   args.labels = pod.Labels
@@ -173,14 +176,18 @@ func extractConnections(args *cniArgs) error {
       break
     }
   }
+  if len(ifaces) == 0 {
+    ifaces = []danmtypes.Interface{{Network: defaultNetworkName}}
+  }
   args.interfaces = ifaces
   return nil
 }
 
 func setupNetworking(args *cniArgs) (*current.Result, error) {
   syncher := syncher.NewSyncher(len(args.interfaces))
-  for _, val := range args.interfaces {
-    go createInterface(syncher, val, args)
+  for nicId, nicParam := range args.interfaces {
+    nicParam.DefaultIfaceName = "eth" + strconv.Itoa(nicId)
+    go createInterface(syncher, nicParam, args)
   }
   err := syncher.GetAggregatedResult()
   return syncher.MergeCniResults(), err
@@ -224,6 +231,7 @@ func createDelegatedInterface(danmClient danmclientset.Interface, iface danmtype
   if delegatedResult != nil {
     setEpIfaceAddress(delegatedResult, &epIfaceSpec)
   }
+  epIfaceSpec.Name = cnidel.CalculateIfaceName(netInfo.Spec.Options.Prefix, iface.DefaultIfaceName)
   ep, err := createDanmEp(epIfaceSpec, netInfo.Spec.NetworkID, netInfo.Spec.NetworkType, args)
   if err != nil {
     return nil, errors.New("DanmEp object could not be created due to error:" + err.Error())
@@ -252,7 +260,7 @@ func createDanmInterface(danmClient danmclientset.Interface, iface danmtypes.Int
     return nil, errors.New("IP address reservation failed for network:" + netId + " with error:" + err.Error())
   }
   epSpec := danmtypes.DanmEpIface {
-    Name: netInfo.Spec.Options.Prefix,
+    Name: cnidel.CalculateIfaceName(netInfo.Spec.Options.Prefix, iface.DefaultIfaceName),
     Address: ip4,
     AddressIPv6: ip6,
     MacAddress: macAddr,
@@ -305,6 +313,7 @@ func createDanmEp(epInput danmtypes.DanmEpIface, netId string, neType string, ar
     Host: host,
     Pod: args.podId,
     CID: args.containerId,
+    Netns: args.netns,
     Creator: "danm",
   }
   meta := meta_v1.ObjectMeta {

@@ -12,6 +12,7 @@ import (
   "github.com/containernetworking/cni/pkg/invoke"
   "github.com/containernetworking/cni/pkg/types"
   "github.com/containernetworking/cni/pkg/types/current"
+  "github.com/containernetworking/cni/pkg/version"
   "github.com/nokia/danm/pkg/ipam"
   danmtypes "github.com/nokia/danm/pkg/crd/apis/danm/v1"
   danmclientset "github.com/nokia/danm/pkg/crd/client/clientset/versioned"
@@ -30,7 +31,7 @@ type cniBackendConfig struct {
   ipamNeeded bool
 }
 
-type cniConfigReader func(netInfo *danmtypes.DanmNet, ipam danmtypes.IpamConfig) ([]byte, error)
+type cniConfigReader func(netInfo *danmtypes.DanmNet, ipam danmtypes.IpamConfig, nicParams danmtypes.Interface) ([]byte, error)
 
 // sriovNet represent the configuration of sriov plugin
 type sriovNet struct {
@@ -111,19 +112,15 @@ func DelegateInterfaceSetup(danmClient danmclientset.Interface, netInfo *danmtyp
     }
     ipamOptions = getCniIpamConfig(netInfo.Spec.Options, ip4, ip6)
   }
-  rawConfig, err := getCniPluginConfig(netInfo, ipamOptions)
+  rawConfig, err := getCniPluginConfig(netInfo, ipamOptions, iface)
   if err != nil {
-    if isIpamNeeded(netInfo.Spec.NetworkType) {
-      ipam.GarbageCollectIps(danmClient, netInfo, ip4, ip6)
-    }
+    freeDelegatedIps(danmClient, netInfo, ip4, ip6)
     return nil, err
   }
   cniType := netInfo.Spec.NetworkType
-  cniResult, err := invoke.DelegateAdd(cniType, rawConfig)
+  cniResult,err := execCniPlugin(cniType, netInfo, iface, rawConfig)
   if err != nil {
-    if isIpamNeeded(netInfo.Spec.NetworkType) {
-      ipam.GarbageCollectIps(danmClient, netInfo, ip4, ip6)
-    }
+    freeDelegatedIps(danmClient, netInfo, ip4, ip6)
     return nil, errors.New("Error delegating ADD to CNI plugin:" + cniType + " because:" + err.Error())
   }
   return cniResult, nil
@@ -163,17 +160,51 @@ func getCniIpamConfig(options danmtypes.DanmNetOption, ip4 string, ip6 string) d
   }
 }
 
-func getCniPluginConfig(netInfo *danmtypes.DanmNet, ipamOptions danmtypes.IpamConfig) ([]byte, error) {
+func getCniPluginConfig(netInfo *danmtypes.DanmNet, ipamOptions danmtypes.IpamConfig, nicParams danmtypes.Interface) ([]byte, error) {
   cniType := netInfo.Spec.NetworkType
   for _, cni := range supportedNativeCnis {
     if cni.BackendName == cniType {
-      return cni.readConfig(netInfo, ipamOptions)
+      return cni.readConfig(netInfo, ipamOptions, nicParams)
     }
   }
   return readCniConfigFile(netInfo)
 }
 
-func getSriovCniConfig(netInfo *danmtypes.DanmNet, ipamOptions danmtypes.IpamConfig) ([]byte, error) {
+func execCniPlugin(cniType string, netInfo *danmtypes.DanmNet, nicParams danmtypes.Interface, rawConfig []byte) (types.Result,error) {
+  cniPath, cniArgs, err := getExecCniParams(cniType, netInfo, nicParams)
+  if err != nil {
+    return nil, err
+  }
+  exec := invoke.RawExec{Stderr: os.Stderr}
+  rawResult, err := exec.ExecPlugin(cniPath, rawConfig, cniArgs)
+  if err != nil {
+    return nil, err
+  }
+  versionDecoder := &version.ConfigDecoder{}
+  confVersion, err := versionDecoder.Decode(rawConfig)
+  if err != nil {
+    return nil, err
+  }
+  return version.NewResult(confVersion, rawResult)
+}
+
+func getExecCniParams(cniType string, netInfo *danmtypes.DanmNet, nicParams danmtypes.Interface) (string,[]string,error) {
+  cniPaths := filepath.SplitList(os.Getenv("CNI_PATH"))
+  cniPath, err := invoke.FindInPath(cniType, cniPaths)
+  if err != nil {
+    return "", nil, err
+  }
+  cniArgs := []string{
+    "CNI_COMMAND="     + os.Getenv("CNI_COMMAND"),
+    "CNI_CONTAINERID=" + os.Getenv("CNI_CONTAINERID"),
+    "CNI_NETNS="       + os.Getenv("CNI_NETNS"),
+    "CNI_IFNAME="      + CalculateIfaceName(netInfo.Spec.Options.Prefix, nicParams.DefaultIfaceName),
+    "CNI_PATH="        + os.Getenv("CNI_PATH"),
+  }
+  return cniPath, cniArgs, nil
+}
+
+func getSriovCniConfig(netInfo *danmtypes.DanmNet, ipamOptions danmtypes.IpamConfig, nicParams danmtypes.Interface) ([]byte, error) {
   vlanid := netInfo.Spec.Options.Vlan
   sriovConfig := sriovNet {
     Name:   netInfo.Spec.NetworkID,
@@ -185,6 +216,7 @@ func getSriovCniConfig(netInfo *danmtypes.DanmNet, ipamOptions danmtypes.IpamCon
     Dpdk:   DpdkOption{},
     Ipam:   ipamOptions,
   }
+  sriovConfig.IfName = CalculateIfaceName(netInfo.Spec.Options.Prefix, nicParams.DefaultIfaceName)
   if ipamOptions.Ip != "" {
     sriovConfig.L2Mode = false
   }
@@ -230,7 +262,7 @@ func parseRoutes(rawRoutes map[string]string, netCidr string) ([]danmtypes.IpamR
 // DelegateInterfaceDelete delegates Ks8 Pod network interface delete task to the input 3rd party CNI plugin
 // Returns an error if interface creation was unsuccessful, or if the 3rd party CNI config could not be loaded
 func DelegateInterfaceDelete(danmClient danmclientset.Interface, netInfo *danmtypes.DanmNet, ip string) error {
-  rawConfig, err := getCniPluginConfig(netInfo, danmtypes.IpamConfig{})
+  rawConfig, err := getCniPluginConfig(netInfo, danmtypes.IpamConfig{}, danmtypes.Interface{})
   if err != nil {
     return err
   }
@@ -238,13 +270,19 @@ func DelegateInterfaceDelete(danmClient danmclientset.Interface, netInfo *danmty
   err = invoke.DelegateDel(cniType, rawConfig)
   if err != nil {
     //Best-effort clean-up because we know how to handle exceptions
-    freeDelegatedIps(danmClient, netInfo, ip)
+    freeDelegatedIp(danmClient, netInfo, ip)
     return errors.New("Error delegating DEL to CNI plugin:" + cniType + " because:" + err.Error())
   }
-  return freeDelegatedIps(danmClient, netInfo, ip)
+  return freeDelegatedIp(danmClient, netInfo, ip)
 }
 
-func freeDelegatedIps(danmClient danmclientset.Interface, netInfo *danmtypes.DanmNet, ip string) error {
+func freeDelegatedIps(danmClient danmclientset.Interface, netInfo *danmtypes.DanmNet, ip4, ip6 string) error {
+  err := freeDelegatedIp(danmClient, netInfo, ip4)
+  err = freeDelegatedIp(danmClient, netInfo, ip6)
+  return err
+}
+
+func freeDelegatedIp(danmClient danmclientset.Interface, netInfo *danmtypes.DanmNet, ip string) error {
   if netInfo.Spec.NetworkType == "flannel" && ip != ""{
     flannelIpExhaustionWorkaround(ip)
   }
@@ -283,4 +321,14 @@ func getEnv(key, fallback string) string {
     return value
   }
   return fallback
+}
+
+// CalculateIfaceName decides what should be the name of a container's interface.
+// If a name is explicitly set in the related DanmNet API object, the NIC will be named accordingly.
+// If a name is not explicitly set, then DANM will name the interface ethX where X=sequence number of the interface
+func CalculateIfaceName(chosenName, defaultName string) string {
+  if chosenName != "" {
+    return chosenName
+  }
+  return defaultName 
 }

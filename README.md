@@ -2,6 +2,9 @@
 [![Build Status](https://travis-ci.org/nokia/danm.svg?branch=master)](https://travis-ci.org/Nokia/danm)
 <img src="https://github.com/nokia/danm/raw/master/logo.png" width="100">
 
+## Don't like reading? Then start by watching our demo video!
+[Demo](example/danm_demo.mp4)
+
 ## Table of Contents
 * [Table of Contents](#table-of-contents)
 * [Introduction](#introduction)
@@ -125,11 +128,11 @@ Netwatcher and svcwatcher binaries are built into their own containers.
 The project contains example Dockerfiles for both components under the integration/docker directory.
 Copying the respective binary into the right folder (netwatcher into integration/docker/netwatcher, svcwatcher into integration/docker/svcwatcher), then executing:
 ```
-docker build integration/docker/netwatcher
+docker build -t netwatcher:latest integration/docker/netwatcher
 ```
 or
 ```
-docker build integration/docker/svcwatcher
+docker build -t svcwatcher:latest integration/docker/svcwatcher
 ```
 builds the respective containers which can be directly integrated into a running Kubernetes cluster!
 ## Deployment
@@ -168,22 +171,22 @@ danm        **fakeipam**      host-device  ipvlan       macvlan      ptp        
 
  **7. Create the netwatcher DaemonSet by executing the following command from the project's root directory:**
  ```
-kubectl create -f integration/manifests/netwatcher/netwatcher_ds.yaml
+kubectl create -f integration/manifests/netwatcher/
 ```
-Note: don't forget to change the names of files and directories pointing to valid kubeconfig files, and TLS certificates used by the K8s API server in your infrastructure before instantiating the component! 
+Note: we assume RBAC is configured for the Kubernetes API, so the manifests include the required Role and ServiceAccount for this case.
 
 You are now ready to use the services of DANM, and can start bringing-up Pods within your cluster!
 
  **+1. OPTIONAL: Create the servicewatcher DaemonSet by executing the following command from the project's root directory:**
  ```
-kubectl create -f integration/manifests/svcwatcher/svcwatcher_ds.yaml
+kubectl create -f integration/manifests/svcwatcher/
 ```
  This component is an optional part of the suite. You only need to install it if you would like to use Kubernetes Services for all the network interfaces of your Pod.
 Note: svcwatcher already leverages DANM CNI to create its network interface. Don't forget to change the name of the network referenced in the example manifest file to one which:
  - exists in your cluster 
  - and through which svcwatcher can reach the Kubernetes API server
  
- We use Flannel for this purpose in our product.
+ We use Flannel for this purpose in our product. We also assume here the RBAC as the API access control method.
 ## User guide
 This section describes what features the DANM networking suite adds to a vanilla Kubernetes environment, and how can users utilize them.
 
@@ -228,6 +231,18 @@ Spec:
   Validation:            True
 Events:                  <none>
 ```
+##### Naming container interfaces
+Generally speaking, you need to care about how the network interfaces of your Pods are named inside their respective network namespaces.
+The hard reality to keep in mind is that you shall always have an interface literally called "eth0" created within all your Kubernetes Pods, because Kubelet will always search for the existence of such an interface at the end of Pod instantiation.
+If such an interface does not exist after CNI is invoked, the state of the Pod will be considered "faulty", and it will be re-created in a loop.
+To be able to comply with this Kubernetes limitation, DANM supports both explicit, and implicit interface naming schemes!
+
+An interface connected to a DanmNet containing the container_prefix attribute will be always named accordingly. You can use this API to explicitly set descriptive, unique names to NICs connecting to this network.
+In case container_prefix is not set in an interface's network descriptor, DANM will automatically name the interface "ethX", where X is a unique integer number corresponding to the sequence number of the network connection (e.g. the first interface defined in the annotation is called "eth0", second interface "eth1" etc.)
+DANM even supports the mixing of the networking schemes within the same Pod, and it supports the whole naming scheme for all network backends.
+While the feature provides complete control over the name of interfaces, ultimately it is the network administrators' responsibility to:
+ - make sure exactly one interface is named eth0 in every Pod
+ - don't configure multiple NICs into the same Pod with clashing names (e.g. provisioning two implicitly named interfaces, and then a third one explicitly named "eth0", or "eth1" etc.) 
 ##### Delegating to other CNI plugins
 Pay special attention to the DanmNet attribute called "NetworkType". This parameter controls which CNI plugin is invoked by the DANM metaplugin during the execution of a CNI operation to setup, or delete exactly one network interface of a Pod.
 
@@ -260,6 +275,7 @@ When network management is delegated to CNI plugins with static integration leve
 Pods can request network connections to DanmNets by defining one or more network connections in the annotation of their (template) spec field, according to the schema described in the **schema/network_attach.yaml** file.
 
 For each connections defined in such a manner DANM will provision exactly one interface into the Pod's network namespace, according to the way described in previous chapters (configuration taken from teh referenced DanmNet API object).
+Note: if the Pod annotation is empty (no danmnet connection is defined), DANM will fall back to use a default network definition, if created. The danmnet object in the target K8S namespace must use the name: "default". It can have any network type (either delegated or ipvlan). Naturally, user in this case cannot specify any further property for the Pod (i.e. static IP address). This way, the user is able to use unmodified manifest files (i.e. community maintained Helm charts or Pods created by K8S operators).
 
 In addition to simply invoking other CNI libraries to set-up network connections, Pod's can even influence the way their interfaces are created to a certain extent.
 For example Pods can ask DANM to provision L3 IP addresses to their IPVLAN or SRI-OV interfaces dnyamically, statically, or not at all!
@@ -349,36 +365,39 @@ However, if you believe in physically separated interfaces (or certain governmen
 
 This duplication of platform responsibility ends today! :)
 
-Allow us to demonstrate the usage of this feature via a simple example located in the project's example/svcwatcher_demo directory.
+Allow us to demonstrate the usage of this feature via an every-day common TelCo inspired example located in the project's example/svcwatcher_demo directory.
 The example contains three Pods running in the same cluster:
-
  - A LoadBalancer Pod, whose job is to accept connections over any exotic but widely used non-L7 protocols (e.g. DIAMETER, LDAP, SIP, SIGTRAN etc.), and distribute the workload to backend services
  - An ExternalClient Pod, supplying the LoadBalancer with traffic through an external network 
  - An InternalProcessor Pod, receiving requests to be served from the LoadBalancer Pod
  
-Our cluster contains three networks: external, internal, management.
+Our cluster contains three physical networks: external, internal, management.
 LoadBalancer connects to all three, because it needs to be able to establish connections to entities both supplying, and serving traffic. LoadBalancer also wishes to be scaled via Prometheus, hence it connects to the cluster's management network to expose its own "packet_served_per_second" custom metric.
 
-ExternalClient only connects to the LoadBalancer Pod, because it only wants to push requests to LoadBalancer, and deal with the result of transactions.
-ExternalClient is not part of the same application as LoadBalancer and InternalProcessor, so it can't have access to their internal network.
-It doesn't require scaling, being a lightweight, non-critical component, therefore it also does not connect to management network.
+ExternalClient only connects to the LoadBalancer Pod, because it simply wants to send traffic to the application (VNF), and deal with the result of transactions. It doesn't care, or know anything about the internal architecture of the application (VNF).
+Because ExternalClient is not part of the same application (namespace) as LoadBalancer and InternalProcessor, it can't have access to their internal network.
+It doesn't require scaling, being a lightweight, non-critical component, therefore it also does not connect to the cluster's management network.
 
-InternalProcessor only connects to the LoadBalancer Pod, but being a small, dynamically changing component, we don't want to expose it to the cluster's external network.
+InternalProcessor only connects to the LoadBalancer Pod, but being a small, dynamically changing component, we don't want to expose it to external clients.
 InternalProcessor wants to have access to the many network-based features of Kubernetes, so it also connects to the management network, similarly to LoadBalancer.
 
 **So, how can ExternalClient(S) discover LoadBalancer(S), how can LoadBalancer(S) discover InternalProcessor(S), and how can we avoid making LoadBalancer(S) and InternalProcessor(S) discoverable through their management interface?**
 
-With DANM, the answer is as simple as instantiating "lb_service.yaml" and "ip_service.yaml" files in your cluster.
+With DANM, the answer is as simple as instantiating the demonstration Kubernetes manifest files in the following order:
+Namespaces -> DanmNets -> Deployments -> Services
+"vnf-internal-processor" will make the InternalProcessors discoverable through their application-internal network interface. LoadBalancers can use this Service to discover working backends serving transactions.
+"vnf-internal-lb" will make the LoadBalancers discoverable through their application-internal  network interface. InternalProcessors can use this Service to discover application egress points/gateway components.
+Lastly, "vnf-external-svc" makes the same LoadBalancer instances discoverable but this time through their external network interfaces. External clients connecting to the same network can use this Service to find the ingress/gateway interfaces of the whole application (VNF)!
 
-As a closing note: remember to delete the now unnecessary Etcd Deployment manifest and Docker image from your Helm chart :)
+As a closing note: remember to delete the now unnecessary Service Discovery tool's Deployment manifest from your Helm chart :)
 
 ## Contributing
 
-Please read [CONTRIBUTING.md]() TODO: PROPER LINK for details on our code of conduct, and the process for submitting pull requests to us.
+Please read [CONTRIBUTING.md](https://github.com/nokia/danm/blob/master/CONTRIBUTING.md) for details on our code of conduct, and the process for submitting pull requests to us.
 
 ## Authors
 
-* **Robert Springer** (@rospring) - Initial work (V1 Ptyhon), IPAM, Netwatcher, Servicewatcher [Nokia](https://github.com/nokia)
+* **Robert Springer** (@rospring) - Initial work (V1 Python), IPAM, Netwatcher, Servicewatcher [Nokia](https://github.com/nokia)
 * **Levente Kale** (@Levovar) - Initial work (V2 Golang), Documentation, Integration, SCM, Metaplugin [Nokia](https://github.com/nokia)
 
 Special thanks to the original author who started the whole project in 2015 by putting a proprietary network management plugin between Kubelet and Docker; and also for coining the DANM acronym:

@@ -85,6 +85,7 @@ type DanmEpSpec struct {
   Host        string      `json:"Host,omitempty"`
   Pod         string      `json:"Pod"`
   CID         string      `json:"CID,omitempty"`
+  Netns       string      `json:"netns,omitempty"`
   Creator     string      `json:"Creator,omitempty"`
   Expires     string      `json:"Expires,omitempty"`
 }
@@ -115,6 +116,7 @@ type Interface struct {
   Ip6 string `json:"ip6"`
   Proutes map[string]string `json:"proutes"`
   Proutes6 map[string]string `json:"proutes6"`
+  DefaultIfaceName string
 }
 
 type IpamConfig struct {
