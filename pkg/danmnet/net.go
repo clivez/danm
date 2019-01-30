@@ -6,7 +6,6 @@ import (
   "math"
   "math/big"
   "net"
-  "strings"
   "strconv"
   "syscall"
   "github.com/apparentlymart/go-cidr/cidr"
@@ -21,10 +20,6 @@ const (
   maxSupportedNetmask = 32
   maxVlanId = 4094
   maxVxlanId = 16777214
-)
-
-var (
-  nativelySupportedCnis = []string{"ipvlan","sriov"}
 )
 
 // LinkInfo is an absract struct to represent a host NIC of a special type: either VLAN, or VxLAN
@@ -65,15 +60,9 @@ func Int2ip6(nn *big.Int) net.IP {
 }
 
 func validateNetwork(dnet *danmtypes.DanmNet) error {
-  cniType := dnet.Spec.NetworkType
-  if cniType == "" {
-    cniType = "ipvlan"
-  }
-  dnet.Spec.NetworkType = strings.ToLower(cniType)
-  for _,supportedCni := range nativelySupportedCnis {
-    if supportedCni == dnet.Spec.NetworkType {
-      return validateDanmNet(dnet)
-    }
+  err := validateDanmNet(dnet)
+  if err != nil {
+    return err
   }
   validate(dnet)
   return nil
@@ -92,7 +81,6 @@ func validateDanmNet(dnet *danmtypes.DanmNet) error {
   if err != nil {
     return err
   }
-  validate(dnet)
   return nil
 }
 
@@ -238,9 +226,6 @@ func validate(dnet *danmtypes.DanmNet) {
 func setupHost(dnet *danmtypes.DanmNet) error {
   netId := dnet.Spec.NetworkID
   hdev := dnet.Spec.Options.Device
-  if dnet.Spec.NetworkType != "ipvlan" {
-    return nil
-  }
   vxlanId := dnet.Spec.Options.Vxlan
   vlanId := dnet.Spec.Options.Vlan
   // Nothing to do here

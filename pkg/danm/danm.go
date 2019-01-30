@@ -185,9 +185,9 @@ func extractConnections(args *cniArgs) error {
 
 func setupNetworking(args *cniArgs) (*current.Result, error) {
   syncher := syncher.NewSyncher(len(args.interfaces))
-  for nicId, nicParam := range args.interfaces {
-    nicParam.DefaultIfaceName = "eth" + strconv.Itoa(nicId)
-    go createInterface(syncher, nicParam, args)
+  for nicId, nicParams := range args.interfaces {
+    nicParams.DefaultIfaceName = "eth" + strconv.Itoa(nicId)
+    go createInterface(syncher, nicParams, args)
   }
   err := syncher.GetAggregatedResult()
   return syncher.MergeCniResults(), err
@@ -222,35 +222,26 @@ func createInterface(syncher *syncher.Syncher, iface danmtypes.Interface, args *
 }
 
 func createDelegatedInterface(danmClient danmclientset.Interface, iface danmtypes.Interface, netInfo *danmtypes.DanmNet, args *cniArgs) (*current.Result,error) {
-  delegateResult,err := cnidel.DelegateInterfaceSetup(danmClient, netInfo, iface)
-  if err != nil {
-    return nil, err
+  epIfaceSpec := danmtypes.DanmEpIface {
+    Name:        cnidel.CalculateIfaceName(netInfo.Spec.Options.Prefix, iface.DefaultIfaceName),
+    Address:     iface.Ip,
+    AddressIPv6: iface.Ip6,
+    Proutes:     iface.Proutes,
+    Proutes6:    iface.Proutes6,
   }
-  delegatedResult := cnidel.ConvertCniResult(delegateResult)
-  epIfaceSpec := danmtypes.DanmEpIface{}
-  if delegatedResult != nil {
-    setEpIfaceAddress(delegatedResult, &epIfaceSpec)
-  }
-  epIfaceSpec.Name = cnidel.CalculateIfaceName(netInfo.Spec.Options.Prefix, iface.DefaultIfaceName)
   ep, err := createDanmEp(epIfaceSpec, netInfo.Spec.NetworkID, netInfo.Spec.NetworkType, args)
   if err != nil {
     return nil, errors.New("DanmEp object could not be created due to error:" + err.Error())
+  }
+  delegatedResult,err := cnidel.DelegateInterfaceSetup(danmClient, netInfo, &ep)
+  if err != nil {
+    return nil, err
   }
   err = putDanmEp(args, ep)
   if err != nil {
     return nil, errors.New("DanmEp object could not be PUT to K8s due to error:" + err.Error())
   }
   return delegatedResult, nil
-}
-
-func setEpIfaceAddress(cniResult *current.Result, epIface *danmtypes.DanmEpIface) error {
-  // TODO: This only works for CNI backends which allocate one IP address per Pod
-  if cniResult.IPs[0].Version == "4" {
-    epIface.Address = cniResult.IPs[0].Address.String()
-  } else {
-    epIface.AddressIPv6 = cniResult.IPs[0].Address.String()
-  }
-  return nil
 }
 
 func createDanmInterface(danmClient danmclientset.Interface, iface danmtypes.Interface, netInfo *danmtypes.DanmNet, args *cniArgs) (*current.Result,error) {
@@ -412,10 +403,6 @@ func deleteInterface(args *cniArgs, syncher *syncher.Syncher, ep danmtypes.DanmE
   if err != nil {
     aggregatedError += "failed to delete container NIC:" + err.Error() + "; "
   }
-  err = ipam.Free(danmClient, *netInfo, ep.Spec.Iface.Address)
-  if err != nil {
-    aggregatedError += "failed to delete container NIC:" + err.Error() + "; "
-  }
   err = deleteEp(danmClient, ep)
   if err != nil {
     aggregatedError += "failed to delete DanmEp:" + err.Error() + "; "
@@ -430,7 +417,7 @@ func deleteInterface(args *cniArgs, syncher *syncher.Syncher, ep danmtypes.DanmE
 func deleteNic(danmClient danmclientset.Interface, netInfo *danmtypes.DanmNet, ep danmtypes.DanmEp) error {
   var err error
   if ep.Spec.NetworkType != "ipvlan" {
-    err = cnidel.DelegateInterfaceDelete(danmClient, netInfo, ep.Spec.Iface.Address)
+    err = cnidel.DelegateInterfaceDelete(danmClient, netInfo, &ep)
   } else {
     err = deleteDanmNet(danmClient, ep, netInfo)
   }
@@ -447,10 +434,7 @@ func deleteEp(danmClient danmclientset.Interface, ep danmtypes.DanmEp) error {
 }
 
 func deleteDanmNet(danmClient danmclientset.Interface, ep danmtypes.DanmEp, netInfo *danmtypes.DanmNet) error {
-  err := ipam.Free(danmClient, *netInfo, ep.Spec.Iface.Address)
-  if err != nil {
-    return errors.New("cannot give back ip4 address for NID:" + ep.Spec.NetworkID + " addr:" +ep.Spec.Iface.Address)
-  }
+  ipam.GarbageCollectIps(danmClient, netInfo, ep.Spec.Iface.Address, ep.Spec.Iface.AddressIPv6)
   return danmep.DeleteIpvlanInterface(ep)
 }
 

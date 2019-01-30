@@ -26,11 +26,11 @@ func createIpvlanInterface(dnet *danmtypes.DanmNet, ep danmtypes.DanmEp) error {
   if ns.IsNSorErr(ep.Spec.Netns) != nil {
     return errors.New("Cannot get container pid!")
   }
-  device := determineIfName(dnet)
+  device := DetermineHostDeviceName(dnet)
   return createContainerIface(ep, dnet, device)
 }
 
-// TODO: Refactor this, as cyclomatic complexity is 40
+// TODO: Refactor this, as cyclomatic complexity is too high
 func createContainerIface(ep danmtypes.DanmEp, dnet *danmtypes.DanmNet, device string) error {
   runtime.LockOSThread()
   defer runtime.UnlockOSThread()
@@ -49,6 +49,9 @@ func createContainerIface(ep danmtypes.DanmEp, dnet *danmtypes.DanmNet, device s
       log.Println("Could not switch back to default ns during IPVLAN interface creation:" + err.Error())
     }
   }()
+  //cns,_ := ns.GetCurrentNS()
+  cpath := origns.Path()
+  log.Println("EP NS BASE PATH:" + cpath)
   iface, err := netlink.LinkByName(device)
   if err != nil {
     return errors.New("cannot find host device because:" + err.Error())
@@ -97,7 +100,7 @@ func createContainerIface(ep danmtypes.DanmEp, dnet *danmtypes.DanmNet, device s
     }
   }
   ip6 := ep.Spec.Iface.AddressIPv6
-  // TODO: Refactor, duplicate of 97-108
+  // TODO: Refactor, duplicate of 87-98
   if ip6 != "" {
     addr6, pref,  err := net.ParseCIDR(ip6)
     if err != nil {
@@ -119,124 +122,9 @@ func createContainerIface(ep danmtypes.DanmEp, dnet *danmtypes.DanmNet, device s
     return errors.New("cannot set renamed IPVLAN interface to up because:" + err.Error())
   }
   sendGratArps(ip, ip6, dstPrefix)
-  // TODO: Refactor, duplicate of 156-176
-  routes := dnet.Spec.Options.Routes
-  for key, value := range routes {
-    _, ipnet, err := net.ParseCIDR(key)
-    if err != nil {
-      //Bad destination in IP route, ignoring the route
-      continue
-    }
-    ip := net.ParseIP(value)
-    if ip == nil {
-      //Bad gateway in IP route, ignoring the route
-      continue
-    }
-    route := netlink.Route{
-      Scope: netlink.SCOPE_UNIVERSE,
-      Dst:   ipnet,
-      Gw:    ip,
-    }
-    err = netlink.RouteAdd(&route)
-    if err != nil {
-      return errors.New("Adding IP route with destination:" + ipnet.String() + " and gateway:" + ip.String() + "failed with error:" + err.Error())
-    }
-  }
-  routes6 := dnet.Spec.Options.Routes6
-  for key, value := range routes6 {
-    _, ipnet, err := net.ParseCIDR(key)
-    if err != nil {
-      //Bad destination in IP route, ignoring the route
-      continue
-    }
-    ip := net.ParseIP(value)
-    if ip == nil {
-      //Bad gateway in IP route, ignoring the route
-      continue
-    }
-    route := netlink.Route{
-      Scope: netlink.SCOPE_UNIVERSE,
-      Dst:   ipnet,
-      Gw:    ip,
-    }
-    err = netlink.RouteAdd(&route)
-    if err != nil {
-      return errors.New("Adding IP route with destination:" + ipnet.String() + " and gateway:" + ip.String() + "failed with error:" + err.Error())
-    }
-  }
-  // TODO: Refactor, duplicate of 212-244
-  proutes := ep.Spec.Iface.Proutes
-  if proutes != nil {
-    srcIp, srcNet, _ := net.ParseCIDR(ep.Spec.Iface.Address)
-    srcCidr := &net.IPNet{IP: srcIp, Mask: srcNet.Mask}
-    rule := netlink.NewRule()
-    rule.Src = srcCidr
-    rule.Table = dnet.Spec.Options.RTables
-    err = netlink.RuleAdd(rule)
-    if err != nil {
-      return errors.New("cannot add rule for policy-based IP routes because:" + err.Error())
-    }
-  }
-  for key, value := range proutes {
-    _, ipnet, err := net.ParseCIDR(key)
-    if err != nil {
-      //Bad destination in IP route, ignoring the route
-      continue
-    }
-    ip := net.ParseIP(value)
-    if ip == nil {
-      //Bad gateway in IP route, ignoring the route
-      continue
-    }
-    rtTable := dnet.Spec.Options.RTables
-    route := netlink.Route{
-      Dst:   ipnet,
-      Gw:    ip,
-      Table: rtTable,
-    }
-    err = netlink.RouteAdd(&route)
-    if err != nil {
-      return errors.New("Adding IP route with destination:" + ipnet.String() + " and gateway:" + ip.String() + "failed with error:" + err.Error())
-    }
-  }
-  proutes6 := ep.Spec.Iface.Proutes6
-  if proutes6 != nil {
-    srcIp6, srcNet6, _ := net.ParseCIDR(ep.Spec.Iface.AddressIPv6)
-    srcPref6 := &net.IPNet{IP: srcIp6, Mask: srcNet6.Mask}
-    rule := netlink.NewRule()
-    rule.Src = srcPref6
-    rule.Table = dnet.Spec.Options.RTables
-    err = netlink.RuleAdd(rule)
-    if err != nil {
-      return errors.New("cannot add rule for policy-based IP routes because:" + err.Error())
-    }
-  }
-  for key, value := range proutes6 {
-    _, ipnet6, err := net.ParseCIDR(key)
-    if err != nil {
-      //Bad destination in IP route, ignoring the route
-      continue
-    }
-    ip6 := net.ParseIP(value)
-    if ip6 == nil {
-      //Bad gateway in IP route, ignoring the route
-      continue
-    }
-    rtTable := dnet.Spec.Options.RTables
-    route := netlink.Route{
-      Dst:   ipnet6,
-      Gw:    ip6,
-      Table: rtTable,
-    }
-    err = netlink.RouteAdd(&route)
-    if err != nil {
-      return errors.New("Adding IP route with destination:" + ipnet6.String() + " and gateway:" + ip6.String() + "failed with error:" + err.Error())
-    }
-  }
-  // set back to default ns
-  err = origns.Set()
+  err = addIpRoutes(ep, dnet)
   if err != nil {
-    return errors.New("cannot set back default ns because:" + err.Error())
+    return errors.New("IP routes could not be provisioned, because:" + err.Error())
   }
   return nil
 }
@@ -269,7 +157,79 @@ func executeArping(srcAddr, ifaceName string) error {
   return nil
 }
 
-// TODO: Refactor this, as cyclomatic complexity is 15
+func addIpRoutes(ep danmtypes.DanmEp, dnet *danmtypes.DanmNet) error {
+  defaultRoutingTable := 0
+  err := addRoutes(dnet.Spec.Options.Routes, defaultRoutingTable)
+  if err != nil {
+    return err
+  }
+  err = addRoutes(dnet.Spec.Options.Routes6, defaultRoutingTable)
+  if err != nil {
+    return err
+  }
+  err = addPolicyRoute(dnet.Spec.Options.RTables, ep.Spec.Iface.Address, ep.Spec.Iface.Proutes)
+  if err != nil {
+    return err
+  }
+  err = addPolicyRoute(dnet.Spec.Options.RTables, ep.Spec.Iface.AddressIPv6, ep.Spec.Iface.Proutes6)
+  if err != nil {
+    return err
+  }
+  return nil
+}
+
+func addRoutes(routes map[string]string, rtable int) error {
+  if routes == nil {
+    return nil
+  }
+  for key, value := range routes {
+    _, ipnet, err := net.ParseCIDR(key)
+    if err != nil {
+      //Bad destination in IP route, ignoring the route
+      continue
+    }
+    ip := net.ParseIP(value)
+    if ip == nil {
+      //Bad gateway in IP route, ignoring the route
+      continue
+    }
+    route := netlink.Route{
+      Dst:   ipnet,
+      Gw:    ip,
+    }
+    if rtable == 0 {
+      route.Scope = netlink.SCOPE_UNIVERSE
+    } else {
+      route.Table = rtable
+    }
+    err = netlink.RouteAdd(&route)
+    if err != nil {
+      return errors.New("Adding IP route with destination:" + ipnet.String() + " and gateway:" + ip.String() + "failed with error:" + err.Error())
+    }
+  }
+  return nil
+}
+
+func addPolicyRoute(rtable int, cidr string, proutes map[string]string) error {
+  if rtable == 0 || cidr == "" || proutes == nil {
+    return nil
+  }
+  srcIp, srcNet, _ := net.ParseCIDR(cidr)
+  srcPref := &net.IPNet{IP: srcIp, Mask: srcNet.Mask}
+  rule := netlink.NewRule()
+  rule.Src = srcPref
+  rule.Table = rtable
+  err := netlink.RuleAdd(rule)
+  if err != nil {
+    return errors.New("cannot add rule for policy-based IP routes because:" + err.Error())
+  }
+  err = addRoutes(proutes, rtable)
+  if err != nil {
+    return err
+  }
+  return nil
+}
+
 func deleteContainerIface(ep danmtypes.DanmEp) error {
   runtime.LockOSThread()
   defer runtime.UnlockOSThread()
