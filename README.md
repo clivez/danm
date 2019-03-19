@@ -1,9 +1,8 @@
 # DANM
 [![Build Status](https://travis-ci.org/nokia/danm.svg?branch=master)](https://travis-ci.org/Nokia/danm)
-<img src="https://github.com/nokia/danm/raw/master/logo.png" width="100">
+[![Unit Test Coverage](https://coveralls.io/repos/github/nokia/danm/badge.svg?branch=master)](https://coveralls.io/github/nokia/danm?branch=master)
 
-## Don't like reading? Then start by watching our demo video!
-[Demo](example/danm_demo.mp4)
+<img src="https://github.com/nokia/danm/raw/master/logo.png" width="100">
 
 ## Table of Contents
 * [Table of Contents](#table-of-contents)
@@ -27,7 +26,10 @@
       * [Connecting Pods to DanmNets](#connecting-pods-to-danmnets)
       * [Internal workings of the metaplugin](#internal-workings-of-the-metaplugin)
     * [DANM IPAM](#danm-ipam)
+      * [IPv6 and dual-stack support](#ipv6-and-dual-stack-support)
     * [DANM IPVLAN CNI](#danm-ipvlan-cni)
+    * [Device Plugin Support](#device-plugin-support)
+      * [Using Intel SR-IOV CNI](#using-intel-sriov-cni)
   * [Usage of DANM's Netwatcher component](#usage-of-danms-netwatcher-component)
   * [Usage of DANM's Svcwatcher component](#usage-of-danms-svcwatcher-component)
     * [Feature description](#feature-description)
@@ -329,11 +331,23 @@ Network administrators can simply put the CIDR, and the allocation pool into the
 
 The flexible IPAM module also allows Pods to define the IP allocation scheme best suited for them. Pods can ask dynamically allocated IPs from the defined allocation pool, or can ask for one, specific, static address.
 The application can even ask DANM to forego the allocation of any IPs to their interface in case a L2 network interface is required.
+##### IPv6 and dual-stack support
+DANM's IPAM module supports both IPv6, and dual-stack (one IPv4, and one IPv6 address provisioned to the same interface) addresses!
+To configure an IPv6 CIDR for a DanmNet, network amdinistrator shall configure the "net6" attribute. Additionally, IP routes for IPv6 subnets can be configured via "routes6".
+If both "cidr", and "net6" are configured for a DanmNet, then Pods connecting to that network can ask either one IPv4 or IPv6 address, or even both at the same time!
+
+That being said, network administrators using IPv6, or dual-stack features need to be aware of the current restrictions of the solution:
+* dynamic IPs are randomly allocated from the defined IPv6 subnet according to the following algorithm:
+  * the IP is prefixed with the net6 parameter of the network
+  * MAC address is randomly generated for the EUI64
+* the smallest supported IPv6 subnet is /64
+* allocation pools cannot be defined for IPv6 subnets
+* DANM does not change kernel level config parameters -such as "disable_ipv6", "auto_ra", or "autoconf"- of host devices, or container interfaces
 #### DANM IPVLAN CNI
 DANM's IPVLAN CNI uses the Linux kernel's IPVLAN module to provision high-speed, low-latency network interfaces for applications which need better performance than a bridge (or any other overlay technology) can provide.
 
 *Keep in mind that the IPVLAN module is a fairly recent addition to the Linux kernel, so the feature cannot be used on systems whose kernel is older than 4.4!
-4.9, 4.11, or 4.14 would be even better (lotta bug fixes)*
+4.14+ would be even better (lotta bug fixes)*
 
 The CNI provisions IPVLAN interfaces in L2 mode, and supports the following extra features:
 * attaching IPVLAN sub-interfaces to any host interface
@@ -342,6 +356,78 @@ The CNI provisions IPVLAN interfaces in L2 mode, and supports the following extr
 * allocating IP addresses by using DANM's flexible, in-built IPAM module
 * provisioning generic IP routes into a configured routing table inside the Pod's network namespace
 * Pod-level controlled provisioning of policy-based IP routes into Pod's network namespace
+#### Device Plugin support
+DANM provides general support to CNIs which interwork with Kubernetes' Device Plugin mechanism such as SR-IOV CNI.
+When a properly configured Network Device Plugin runs, the allocatable resource list for the node should be updated with resource discovered by the plugin.
+##### Using Intel SR-IOV CNI
+SR-IOV Network Device Plugin allows to create a list of *netdevice* type resource definitions with *sriovMode*, where each resource definition can have one or more assigned *rootDevice* (Physical Function). The plugin looks for Virtual Funtions (VF) for each configured Physical Function (PF) and adds all discovered VF to the allocatable resource's list of the given Kubernetes Node. The Device Plugin resource name will be the device pool name on the Node. These device pools can be referred in Pod definition's resource request part on the usual way.
+
+In the following example, the "nokia.k8s.io/sriov_ens1f0" device pool name consists of the "nokia.k8s.io" prefix and "sriov_ens1f0" resourceName.
+
+For more information consult the plugin's users guide.
+```
+kubectl get nodes 172.30.101.104 -o json | jq '.status.allocatable'
+{
+  "cpu": "48",
+  "ephemeral-storage": "48308001098",
+  "hugepages-1Gi": "16Gi",
+  "memory": "246963760Ki",
+  "nokia.k8s.io/default": "0",
+  "nokia.k8s.io/sriov_ens1f0": "8",
+  "nokia.k8s.io/sriov_ens1f1": "8",
+  "pods": "110"
+}
+```
+DanmNet's schema definition contains an optional device_pool field where a specific device pool can be assigned to the given DanmNet.
+Before DANM invokes a CNI which expects a given resource to be attached to the Pod, it gathers all available device IDs from the DanmNet's device pool and passes one ID from the list to the CNI.
+
+The following DanmNet definition shows how to configure device_pool parameter for sriov network type.
+```
+apiVersion: danm.k8s.io/v1
+kind: DanmNet
+metadata:
+  name: sriov-a
+  namespace: example-sriov
+spec:
+  NetworkID: sriov-a
+  NetworkType: sriov
+  Options:
+    host_device: ens1f0
+    device_pool: "nokia.k8s.io/sriov_ens1f0"
+```
+The following Pod definition shows how to create resource request for each sriov type DanmNet.
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sriov-pod
+  namespace: example-sriov
+  labels:
+    env: test
+  annotations:
+    danm.k8s.io/interfaces: |
+      [
+        {"network":"management", "ip":"dynamic"},
+        {"network":"sriov-a", "ip":"none"},
+        {"network":"sriov-b", "ip":"none"}
+      ]
+spec:
+  containers:
+  - name: sriov-pod
+    image: busybox:latest
+    args:
+      - sleep
+      - "1000"
+    resources:
+      requests:
+        nokia.k8s.io/sriov_ens1f0: '1'
+        nokia.k8s.io/sriov_ens1f1: '1'
+      limits:
+        nokia.k8s.io/sriov_ens1f0: '1'
+        nokia.k8s.io/sriov_ens1f1: '1'
+  nodeSelector:
+    sriov: enabled
+```
 
 ### Usage of DANM's Netwatcher component
 Netwatcher is a mandatory component of the DANM networking suite.

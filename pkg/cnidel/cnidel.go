@@ -12,8 +12,8 @@ import (
   "github.com/containernetworking/cni/pkg/version"
   "github.com/nokia/danm/pkg/danmep"
   "github.com/nokia/danm/pkg/ipam"
-  danmtypes "github.com/nokia/danm/pkg/crd/apis/danm/v1"
-  danmclientset "github.com/nokia/danm/pkg/crd/client/clientset/versioned"
+  danmtypes "github.com/nokia/danm/crd/apis/danm/v1"
+  danmclientset "github.com/nokia/danm/crd/client/clientset/versioned"
   meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -31,7 +31,11 @@ var (
 func IsDelegationRequired(danmClient danmclientset.Interface, nid, namespace string) (bool,*danmtypes.DanmNet,error) {
   netInfo, err := danmClient.DanmV1().DanmNets(namespace).Get(nid, meta_v1.GetOptions{})
   if err != nil || netInfo.ObjectMeta.Name == ""{
-    return false, nil, errors.New("NID:" + nid + " in namespace:" + namespace + " cannot be GET from K8s API server!")
+    var detailedErrorMessage string
+    if err != nil {
+      detailedErrorMessage = err.Error()
+    }
+    return false, nil, errors.New("NID:" + nid + " in namespace:" + namespace + " cannot be GET from K8s API server, because of error:" + detailedErrorMessage)
   }
   neType := netInfo.Spec.NetworkType
   if neType == "ipvlan" || neType == "" {
@@ -86,6 +90,15 @@ func isIpamNeeded(cniType string) bool {
   return false
 }
 
+func IsDeviceNeeded(cniType string) bool {
+  for _, cni := range supportedNativeCnis {
+    if cni.BackendName == cniType {
+      return cni.deviceNeeded
+    }
+  }
+  return false
+}
+
 func getCniIpamConfig(options danmtypes.DanmNetOption, ip4, ip6 string) danmtypes.IpamConfig {
   var (
     subnet string
@@ -118,19 +131,23 @@ func getCniPluginConfig(netInfo *danmtypes.DanmNet, ipamOptions danmtypes.IpamCo
 func execCniPlugin(cniType string, netInfo *danmtypes.DanmNet, rawConfig []byte, ep *danmtypes.DanmEp) (types.Result,error) {
   cniPath, cniArgs, err := getExecCniParams(cniType, netInfo, ep)
   if err != nil {
-    return nil, err
+    return nil, errors.New("exec CNI params couldn't be gathered:" + err.Error())
   }
   exec := invoke.RawExec{Stderr: os.Stderr}
   rawResult, err := exec.ExecPlugin(cniPath, rawConfig, cniArgs)
   if err != nil {
-    return nil, err
+    return nil, errors.New("OS exec call failed:" + err.Error())
   }
   versionDecoder := &version.ConfigDecoder{}
-  confVersion, err := versionDecoder.Decode(rawConfig)
-  if err != nil {
-    return nil, err
+  confVersion, err := versionDecoder.Decode(rawConfig)  
+  if err != nil || rawResult == nil {
+    return &current.Result{}, nil
   }
-  return version.NewResult(confVersion, rawResult)
+  convertedResult, err := version.NewResult(confVersion, rawResult)
+  if err != nil || convertedResult == nil {
+    return &current.Result{}, nil
+  }
+  return convertedResult, nil
 }
 
 func getExecCniParams(cniType string, netInfo *danmtypes.DanmNet, ep *danmtypes.DanmEp) (string,[]string,error) {
@@ -171,7 +188,7 @@ func DelegateInterfaceDelete(danmClient danmclientset.Interface, netInfo *danmty
     return err
   }
   cniType := netInfo.Spec.NetworkType
-  err = invoke.DelegateDel(cniType, rawConfig)
+  _, err = execCniPlugin(cniType, netInfo, rawConfig, ep)
   if err != nil {
     freeDelegatedIps(danmClient, netInfo, ep.Spec.Iface.Address, ep.Spec.Iface.AddressIPv6)
     return errors.New("Error delegating DEL to CNI plugin:" + cniType + " because:" + err.Error())

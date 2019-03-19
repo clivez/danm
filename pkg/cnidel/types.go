@@ -1,7 +1,7 @@
 package cnidel
 
 import (
-  danmtypes "github.com/nokia/danm/pkg/crd/apis/danm/v1"
+  danmtypes "github.com/nokia/danm/crd/apis/danm/v1"
 )
 
 type cniConfigReader func(netInfo *danmtypes.DanmNet, ipam danmtypes.IpamConfig, ep *danmtypes.DanmEp) ([]byte, error)
@@ -10,16 +10,17 @@ type cniBackendConfig struct {
   danmtypes.CniBackend
   readConfig cniConfigReader
   ipamNeeded bool
+  deviceNeeded bool
 }
 
-// sriovNet represent the configuration of sriov plugin
+// sriovNet represent the configuration of sriov plugin v1.0.0
 type sriovNet struct {
   // the name of the network
   Name   string     `json:"name"`
   // currently constant "sriov"
   Type   string     `json:"type"`
-  // name of the PF
-  PfName string     `json:"if0"`
+  // name of the PF since sriov cni v1.0.0
+  PfName string     `json:"master"`
   // interface name in the Container
   IfName string     `json:"if0name,omitEmpty"`
   // if true then add VF as L2 mode only, IPAM will not be executed
@@ -28,18 +29,19 @@ type sriovNet struct {
   Vlan   int        `json:"vlan,omitEmpty"`
   // IPAM configuration to be used for this network
   Ipam   danmtypes.IpamConfig `json:"ipam,omitEmpty"`
-  // DPDK configuration
-  Dpdk   DpdkOption `json:"dpdk,omitEmpty"`
+  // CNI binary location
+  CNIDir string `json:"cniDir"`
+  // Device PCI ID
+  DeviceID string `json:"deviceID"`
+  // Device Info
+  DeviceInfo *VfInformation `json:"deviceinfo,omitempty"`
 }
 
-// DpdkOption represents the DPDK options for the sriov plugin
-type DpdkOption struct {
-  // The name of kernel NIC driver
-  NicDriver  string `json:"kernel_driver"`
-  // The name of DPDK capable driver
-  DpdkDriver string `json:"dpdk_driver"`
-  // Path to the dpdk-devbind.py script
-  DpdkTool   string `json:"dpdk_tool"`
+// VfInformation is a DeviceInfo desctiprtor expected by sriov plugin v1.0.0
+type VfInformation struct {
+  PCIaddr string `json:"pci_addr"`
+  Pfname  string `json:"pfname"`
+  Vfid    int    `json:"vfid"`
 }
 
 type macvlanNet struct {
