@@ -1,0 +1,23 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: routed-deployment
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: routed
+      annotations:
+        danm.k8s.io/interfaces: |
+          [
+            {"clusterNetwork":"network-with-route", "ip":"dynamic", "proutes":{"10.10.1.0/24": "10.0.0.65"}}
+          ]
+    spec:
+      containers:
+      - name: busybox
+        imagePullPolicy: IfNotPresent
+        image: busybox:latest
+        args:
+        - sleep
+        - "1000"

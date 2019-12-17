@@ -3,10 +3,15 @@ package syncher
 import (
   "errors"
   "fmt"
+  "strconv"
   "strings"
   "sync"
   "time"
   "github.com/containernetworking/cni/pkg/types/current"
+)
+
+const (
+  MaximumAllowedTime = 3000
 )
 
 type cniOpResult struct {
@@ -28,19 +33,19 @@ func NewSyncher(numOfResults int) *Syncher {
 }
 
 func (synch *Syncher) PushResult(cniName string, opRes error, cniRes *current.Result) {
+  synch.mux.Lock()
+  defer synch.mux.Unlock()
   cniOpResult := cniOpResult {
     CniName: cniName,
     OpResult: opRes,
     CniResult: cniRes,
   }
-  synch.mux.Lock()
-  defer synch.mux.Unlock()
   synch.CniResults = append(synch.CniResults, cniOpResult)
 }
 
 func (synch *Syncher) GetAggregatedResult() error {
-  //Time-out Pod creation if a plugin did not provide result within 10 seconds
-  for i := 0; i < 1000; i++ {
+  //Time-out Pod creation if plugins did not provide results within the configured timeframe
+  for i := 0; i < MaximumAllowedTime; i++ {
     if synch.ExpectedNumOfResults > len(synch.CniResults) {
       time.Sleep(10 * time.Millisecond)
       continue
@@ -50,7 +55,7 @@ func (synch *Syncher) GetAggregatedResult() error {
     }
     return nil
   }
-  return errors.New("CNI operation timed-out after 10 seconds")
+  return errors.New("CNI operation timed-out after " + strconv.Itoa(MaximumAllowedTime) + " seconds")
 }
 
 func (synch *Syncher) wasAnyOperationErroneous() bool {

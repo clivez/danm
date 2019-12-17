@@ -7,32 +7,32 @@ import (
   "strconv"
   "strings"
   "time"
+  "encoding/binary"
   "math/big"
   "math/rand"
-  meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
   danmtypes "github.com/nokia/danm/crd/apis/danm/v1"
   danmclientset "github.com/nokia/danm/crd/client/clientset/versioned"
-  client "github.com/nokia/danm/crd/client/clientset/versioned/typed/danm/v1"
   "github.com/nokia/danm/pkg/netcontrol"
   "github.com/nokia/danm/pkg/bitarray"
 )
 
-// Reserve inspects the DanmNet object received as an input, and allocates an IPv4 or IPv6 address from the appropriate allocation pool
+// Reserve inspects the network object received as an input, and allocates an IPv4 or IPv6 address from the appropriate allocation pool
 // In case static IP allocation is requested, it will try reserver the requested error. If it is not possible, it returns an error
 // The reserved IP address is represented by setting a bit in the network's BitArray type allocation matrix
-// The refreshed DanmNet object is modified in the K8s API server at the end
+// The refreshed network object is modified in the K8s API server at the end
 func Reserve(danmClient danmclientset.Interface, netInfo danmtypes.DanmNet, req4, req6 string) (string, string, string, error) {
-  if netInfo.Spec.Validation != true {
-    return "", "", "", errors.New("Invalid network: " + netInfo.Spec.NetworkID)
-  }
+  origAlloc := netInfo.Spec.Options.Alloc
   tempNetSpec := netInfo
-  netClient := danmClient.DanmV1().DanmNets(netInfo.ObjectMeta.Namespace)
   for {
     ip4, ip6, macAddr, err := allocateIP(&tempNetSpec, req4, req6)
     if err != nil {
-      return "", "", "", errors.New("failed to allocate IP address for network:" + netInfo.Spec.NetworkID + " with error:" + err.Error())
+      return "", "", "", errors.New("failed to allocate IP address for network:" + netInfo.ObjectMeta.Name + " with error:" + err.Error())
     }
-    retryNeeded, err, newNetSpec := updateDanmNetAllocation(netClient, tempNetSpec)
+    //Right now we only store IPv4 allocations in the API. If this bitmask is unchanged, there is nothing to update in the API server
+    if tempNetSpec.Spec.Options.Alloc == origAlloc {
+      return ip4, ip6, macAddr, nil
+    }
+    retryNeeded, err, newNetSpec := updateIpAllocation(danmClient, tempNetSpec)
     if err != nil {
       return "", "", "", err
     }
@@ -44,19 +44,23 @@ func Reserve(danmClient danmclientset.Interface, netInfo danmtypes.DanmNet, req4
   }
 }
 
-// Free inspects the DanmNet object received as an input, and releases an IPv4 or IPv6 address from the appropriate allocation pool
+// Free inspects the network object received as an input, and releases an IPv4 or IPv6 address from the appropriate allocation pool
 // The IP address liberation is represented by unsetting a bit in the network's BitArray type allocation matrix
-// The refreshed DanmNet object is modified in the K8s API server at the end
+// The refreshed network object is modified in the K8s API server at the end
 func Free(danmClient danmclientset.Interface, netInfo danmtypes.DanmNet, ip string) error {
   if netInfo.Spec.Options.Alloc == "" || ip == "" {
     // Nothing to return here: either network, or the interface is an L2
     return nil
   }
+  origAlloc := netInfo.Spec.Options.Alloc
   tempNetSpec := netInfo
-  netClient := danmClient.DanmV1().DanmNets(netInfo.ObjectMeta.Namespace)
   for {
     resetIP(&tempNetSpec, ip)
-    retryNeeded, err, newNetSpec := updateDanmNetAllocation(netClient, tempNetSpec)
+    //Right now we only store IPv4 allocations in the API. If this bitmask is unchanged, there is nothing to update in the API server
+    if tempNetSpec.Spec.Options.Alloc == origAlloc {
+      return nil
+    }
+    retryNeeded, err, newNetSpec := updateIpAllocation(danmClient, tempNetSpec)
     if err != nil {
       return err
     }
@@ -68,13 +72,13 @@ func Free(danmClient danmclientset.Interface, netInfo danmtypes.DanmNet, ip stri
   }
 }
 
-func updateDanmNetAllocation (netClient client.DanmNetInterface, netInfo danmtypes.DanmNet) (bool,error,danmtypes.DanmNet) {
-  resourceConflicted, err := netcontrol.PutDanmNet(netClient, &netInfo)
+func updateIpAllocation (danmClient danmclientset.Interface, netInfo danmtypes.DanmNet) (bool,error,danmtypes.DanmNet) {
+  resourceConflicted, err := netcontrol.PutNetwork(danmClient, &netInfo)
   if err != nil {
     return false, errors.New("DanmNet update failed with error:" + err.Error()), danmtypes.DanmNet{}
   }
   if resourceConflicted {
-    newNetSpec, err := netClient.Get(netInfo.Spec.NetworkID, meta_v1.GetOptions{})
+    newNetSpec, err := netcontrol.RefreshNetwork(danmClient, netInfo)
     if err != nil {
       return false, errors.New("After IP address reservation conflict, network cannot be read again!"), danmtypes.DanmNet{}
     }
@@ -87,13 +91,13 @@ func updateDanmNetAllocation (netClient client.DanmNetInterface, netInfo danmtyp
 func resetIP(netInfo *danmtypes.DanmNet, rip string) {
   ba := bitarray.NewBitArrayFromBase64(netInfo.Spec.Options.Alloc)
   _, ipnet, _ := net.ParseCIDR(netInfo.Spec.Options.Cidr)
-  ipnetNum := netcontrol.Ip2int(ipnet.IP)
+  ipnetNum := Ip2int(ipnet.IP)
   ip, _, err := net.ParseCIDR(rip)
   if err != nil {
     //Invalid IP, nothing to do here. Next call would crash if we wouldn't return
     return
   }
-  reserved := netcontrol.Ip2int(ip)
+  reserved := Ip2int(ip)
   if !ipnet.Contains(ip) {
     //IP is outside of CIDR, nothing to do here. Next call would crash if we wouldn't return
     return
@@ -128,17 +132,17 @@ func allocIPv4(reqType string, netInfo *danmtypes.DanmNet, ip4 *string) (error) 
     return nil
   } else if reqType == "dynamic" {
     if netInfo.Spec.Options.Alloc == "" {
-      return errors.New("Ipv4 address cannot be dynamically allocated for an L2 network!")
+      return errors.New("IPv4 address cannot be dynamically allocated for an L2 network!")
     }
     ba := bitarray.NewBitArrayFromBase64(netInfo.Spec.Options.Alloc)
     _, ipnet, _ := net.ParseCIDR(netInfo.Spec.Options.Cidr)
-    ipnetNum := netcontrol.Ip2int(ipnet.IP)
-    begin := netcontrol.Ip2int(net.ParseIP(netInfo.Spec.Options.Pool.Start)) - ipnetNum
-    end := netcontrol.Ip2int(net.ParseIP(netInfo.Spec.Options.Pool.End)) - ipnetNum
+    ipnetNum := Ip2int(ipnet.IP)
+    begin := Ip2int(net.ParseIP(netInfo.Spec.Options.Pool.Start)) - ipnetNum
+    end := Ip2int(net.ParseIP(netInfo.Spec.Options.Pool.End)) - ipnetNum
     for i:=begin; i<=end; i++ {
       if !ba.Get(uint32(i)) {
         ones, _ := ipnet.Mask.Size()
-        *ip4 = (netcontrol.Int2ip(ipnetNum + i)).String() + "/" + strconv.Itoa(ones)
+        *ip4 = (Int2ip(ipnetNum + i)).String() + "/" + strconv.Itoa(ones)
         ba.Set(uint32(i))
         netInfo.Spec.Options.Alloc = ba.Encode()
         break
@@ -160,8 +164,8 @@ func allocIPv4(reqType string, netInfo *danmtypes.DanmNet, ip4 *string) (error) 
       return errors.New("static ip is not part of network CIDR/allocation pool")
     }
     ba := bitarray.NewBitArrayFromBase64(netInfo.Spec.Options.Alloc)
-    ipnetNum := netcontrol.Ip2int(ipnetFromNet.IP)
-    requested := netcontrol.Ip2int(ip)
+    ipnetNum := Ip2int(ipnetFromNet.IP)
+    requested := Ip2int(ip)
     if ba.Get(requested - ipnetNum) {
       return errors.New("requested fix ip address is already in use")
     }
@@ -189,12 +193,12 @@ func allocIPv6(reqType string, netInfo *danmtypes.DanmNet, ip6 *string, macAddr 
     bigeui.SetString(eui, 16)
     ip6addr, ip6net, _ := net.ParseCIDR(net6)
     ss := big.NewInt(0)
-    ss.Add(netcontrol.Ip62int(ip6addr), bigeui)
+    ss.Add(Ip62int(ip6addr), bigeui)
     maskLen, _ := ip6net.Mask.Size()
     if maskLen>64 {
       return errors.New("IPv6 subnets smaller than /64 are not supported at the moment!")
     }
-    *ip6 = (netcontrol.Int2ip6(ss)).String() + "/" + strconv.Itoa(maskLen)
+    *ip6 = (Int2ip6(ss)).String() + "/" + strconv.Itoa(maskLen)
   } else {
     net6 := netInfo.Spec.Options.Net6
     if net6 == "" {
@@ -222,4 +226,34 @@ func generateMac()(string) {
 func GarbageCollectIps(danmClient danmclientset.Interface, netInfo *danmtypes.DanmNet, ip4, ip6 string) {
   Free(danmClient, *netInfo, ip4)
   Free(danmClient, *netInfo, ip6)
+}
+
+// Ip2int converts an IP address stored according to the Golang net package to a native Golang big endian, 32-bit integer
+func Ip2int(ip net.IP) uint32 {
+  if len(ip) == 16 {
+    return binary.BigEndian.Uint32(ip[12:16])
+  }
+  return binary.BigEndian.Uint32(ip)
+}
+
+// Ip62int converts an IPv6 address stored according to the Golang net package to a native Golang big endian, 64-bit integer
+func Ip62int(ip6 net.IP) *big.Int {
+  Ip6Int := big.NewInt(0)
+  Ip6Int.SetBytes(ip6.To16())
+  return Ip6Int
+}
+
+// Int2ip converts an IP address stored as a native Golang big endian, 32-bit integer to an IP
+// represented according to the Golang net package
+func Int2ip(nn uint32) net.IP {
+  ip := make(net.IP, 4)
+  binary.BigEndian.PutUint32(ip, nn)
+  return ip
+}
+
+// Int2ip6 converts an IP address stored as a native Golang big endian, 64-bit integer to an IP
+// represented according to the Golang net package
+func Int2ip6(nn *big.Int) net.IP {
+  ip := nn.Bytes()
+  return ip
 }

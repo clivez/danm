@@ -1,11 +1,13 @@
 package metacni
 
 import (
+  "bytes"
   "errors"
   "fmt"
   "log"
   "net"
   "os"
+  "runtime"
   "strconv"
   "strings"
   "encoding/json"
@@ -13,34 +15,39 @@ import (
   "github.com/containernetworking/cni/pkg/skel"
   "github.com/containernetworking/cni/pkg/types"
   "github.com/containernetworking/cni/pkg/types/current"
+  "github.com/containernetworking/plugins/pkg/ns"
+  "github.com/containernetworking/plugins/pkg/utils/sysctl"
+  core_v1 "k8s.io/api/core/v1"
   meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-  k8s "k8s.io/apimachinery/pkg/types"
   "k8s.io/client-go/rest"
   "k8s.io/client-go/tools/clientcmd"
   "k8s.io/client-go/kubernetes"
   danmtypes "github.com/nokia/danm/crd/apis/danm/v1"
   danmclientset "github.com/nokia/danm/crd/client/clientset/versioned"
-  "github.com/nokia/danm/pkg/danmep"
-  "github.com/nokia/danm/pkg/ipam"
   "github.com/nokia/danm/pkg/cnidel"
+  "github.com/nokia/danm/pkg/danmep"
+  "github.com/nokia/danm/pkg/datastructs"
+  "github.com/nokia/danm/pkg/ipam"
+  "github.com/nokia/danm/pkg/netcontrol"
   "github.com/nokia/danm/pkg/syncher"
   checkpoint_utils "github.com/intel/multus-cni/checkpoint"
+  multus_types "github.com/intel/multus-cni/types"
 )
 
-var (
-  apiHost = os.Getenv("API_SERVERS")
+const (
   danmApiPath = "danm.k8s.io"
   danmIfDefinitionSyntax = danmApiPath + "/interfaces"
   v1Endpoint = "/api/v1/"
   cniVersion = "0.3.1"
-  kubeConf string
   defaultNetworkName = "default"
+  defaultIfName = "eth"
+  DefaultCniDir = "/etc/cni/net.d"
 )
 
-type NetConf struct {
-  types.NetConf
-  Kubeconfig string `json:"kubeconfig"`
-}
+var (
+  apiHost = os.Getenv("API_SERVERS")
+  DanmConfig *datastructs.NetConf
+)
 
 // K8sArgs is the valid CNI_ARGS type used to parse K8s CNI event calls (thanks Multus)
 type K8sArgs struct {
@@ -56,11 +63,10 @@ type cniArgs struct {
   netns string
   podId string
   containerId string
-  annotation map[string]string
-  labels map[string]string
   stdIn []byte
-  interfaces []danmtypes.Interface
-  podUid k8s.UID
+  interfaces []datastructs.Interface
+  pod *core_v1.Pod
+  defaultNetwork *danmtypes.DanmNet
 }
 
 func CreateInterfaces(args *skel.CmdArgs) error {
@@ -70,13 +76,32 @@ func CreateInterfaces(args *skel.CmdArgs) error {
     return fmt.Errorf("CNI args cannot be loaded with error: %v", err)
   }
   log.Println("CNI ADD invoked with: ns:" + cniArgs.nameSpace + " PID:" + cniArgs.podId + " CID: " + cniArgs.containerId)
-  if err = getPodAttributes(cniArgs); err != nil {
+  err = loadNetConf(cniArgs.stdIn)
+  if err != nil {
+    return errors.New("ERROR: ADD: cannot load DANM CNI config due to error:" + err.Error())
+  }
+  err = getPod(cniArgs)
+  if err != nil {
     log.Println("ERROR: ADD: Pod manifest could not be parsed with error:" + err.Error())
     return fmt.Errorf("Pod manifest could not be parsed with error: %v", err)
   }
-  extractConnections(cniArgs)
-  if len(cniArgs.interfaces) == 1 && cniArgs.interfaces[0].Network == defaultNetworkName {
-    log.Println("WARN: ADD: no network connections for Pod: " + cniArgs.podId + " are defined in spec.metadata.annotation. Falling back to use: " + defaultNetworkName)
+  err = extractConnections(cniArgs)
+  if err != nil {
+    log.Println("ERROR: ADD: DANM annotation cannot be parsed:" + err.Error())
+    return fmt.Errorf("DANM annotation cannot be parsed: %v", err)
+  }
+  if len(cniArgs.interfaces) == 0 {
+    danmClient, err := CreateDanmClient(DanmConfig.Kubeconfig)
+    if err != nil {
+      log.Println("ERROR: cannot instantiate K8s client, because:" + err.Error())
+      return fmt.Errorf("ERROR: cannot instantiate K8s client: %v", err)
+    }
+    defaultNet, err := netcontrol.GetDefaultNetwork(danmClient, defaultNetworkName, cniArgs.pod.ObjectMeta.Namespace)
+    if err != nil {
+      log.Println("ERROR: there are no network connections defined for Pod:" + cniArgs.pod.ObjectMeta.Name + ", and there is no suitable default network configured in the cluster!")
+      return errors.New("there are no network connections defined, and there is no suitable default network configured in the cluster")
+    }
+    cniArgs.defaultNetwork = defaultNet
   }
   cniResult, err := setupNetworking(cniArgs)
   if err != nil {
@@ -89,8 +114,8 @@ func CreateInterfaces(args *skel.CmdArgs) error {
   return types.PrintResult(cniResult, cniVersion)
 }
 
-func createDanmClient(stdIn []byte) (danmclientset.Interface,error) {
-  config, err := getClientConfig(stdIn)
+func CreateDanmClient(kubeConfig string) (danmclientset.Interface,error) {
+  config, err := getClientConfig(kubeConfig)
   if err != nil {
     return nil, errors.New("Parsing kubeconfig failed with error:" + err.Error())
   }
@@ -101,26 +126,25 @@ func createDanmClient(stdIn []byte) (danmclientset.Interface,error) {
   return client, nil
 }
 
-func getClientConfig(stdIn []byte) (*rest.Config, error){
-  confArgs, err := loadNetConf(stdIn)
-  if err != nil {
-    return nil, err
-  }
-  kubeConf = confArgs.Kubeconfig
-  config, err := clientcmd.BuildConfigFromFlags("", kubeConf)
+func getClientConfig(kubeConfig string) (*rest.Config, error){
+  config, err := clientcmd.BuildConfigFromFlags("", kubeConfig)
   if err != nil {
     return nil, err
   }
   return config, nil
 }
 
-func loadNetConf(bytes []byte) (*NetConf, error) {
-  netconf := &NetConf{}
+func loadNetConf(bytes []byte) error {
+  netconf := &datastructs.NetConf{}
   err := json.Unmarshal(bytes, netconf)
   if err != nil {
-    return nil, errors.New("failed to load netconf:" + err.Error())
+    return errors.New("Failed to parse DANM's CNI config file:" + err.Error())
   }
-  return netconf, nil
+  DanmConfig = netconf
+  if DanmConfig.CniConfigDir == "" {
+    DanmConfig.CniConfigDir = DefaultCniDir
+  }
+  return nil
 }
 
 func extractCniArgs(args *skel.CmdArgs) (*cniArgs,error) {
@@ -133,21 +157,16 @@ func extractCniArgs(args *skel.CmdArgs) (*cniArgs,error) {
                      args.Netns,
                      string(kubeArgs.K8S_POD_NAME),
                      string(kubeArgs.K8S_POD_INFRA_CONTAINER_ID),
-                     nil,
-                     nil,
                      args.StdinData,
                      nil,
-                     "",
+                     nil,
+                     nil,
                     }
   return &cmdArgs, nil
 }
 
-func getPodAttributes(args *cniArgs) error {
-  confArgs, err := loadNetConf(args.stdIn)
-  if err != nil {
-    return errors.New("cannot load CNI NetConf due to error:" + err.Error())
-  }
-  k8sClient, err := createK8sClient(confArgs.Kubeconfig)
+func getPod(args *cniArgs) error {
+  k8sClient, err := createK8sClient(DanmConfig.Kubeconfig)
   if err != nil {
     return errors.New("cannot create K8s REST client due to error:" + err.Error())
   }
@@ -155,9 +174,7 @@ func getPodAttributes(args *cniArgs) error {
   if err != nil {
     return errors.New("failed to get Pod info from K8s API server due to:" + err.Error())
   }
-  args.annotation = pod.Annotations
-  args.labels = pod.Labels
-  args.podUid = pod.UID
+  args.pod = pod
   return nil
 }
 
@@ -170,27 +187,156 @@ func createK8sClient(kubeconfig string) (kubernetes.Interface, error) {
 }
 
 func extractConnections(args *cniArgs) error {
-  var ifaces []danmtypes.Interface
-  for key, val := range args.annotation {
+  var ifaces []datastructs.Interface
+  for key, val := range args.pod.Annotations {
     if strings.Contains(key, danmIfDefinitionSyntax) {
-      err := json.Unmarshal([]byte(val), &ifaces)
+      decoder := json.NewDecoder(bytes.NewReader([]byte(val)))
+      //We are using Decoder interface, because it can notify us if any unknown fields were put into the object
+      decoder.DisallowUnknownFields()
+      err := decoder.Decode(&ifaces)
       if err != nil {
-        return errors.New("Can't create network interfaces for Pod: " + args.podId + " due to badly formatted " + danmIfDefinitionSyntax + " definition in Pod annotation")
+        return errors.New("Can't create network interfaces for Pod: " + args.pod.ObjectMeta.Name + " due to badly formatted " + danmIfDefinitionSyntax + " definition in Pod annotation:" + err.Error())
       }
       break
     }
   }
-  if len(ifaces) == 0 {
-    ifaces = []danmtypes.Interface{{Network: defaultNetworkName}}
+  if err := validateAnnotation(ifaces); err!=nil {
+    return errors.New("DANM annotation is invalid for Pod: " + args.pod.ObjectMeta.Name + ", because:" + err.Error())
   }
   args.interfaces = ifaces
   return nil
 }
 
-func getAllocatedDevices(args *cniArgs, checkpoint checkpoint_utils.Checkpoint, devicePool string)(*[]string, error){
-  resourceMap, err := checkpoint.GetComputeDeviceMap(string(args.podUid))
-  if err != nil || len(resourceMap) == 0 {
+func validateAnnotation(ifaces []datastructs.Interface) error {
+  for ifaceId, iface := range ifaces {
+    var definedNetworks int
+    if iface.Network        != "" {definedNetworks++}
+    if iface.TenantNetwork  != "" {definedNetworks++}
+    if iface.ClusterNetwork != "" {definedNetworks++}
+    if definedNetworks != 1 {
+      return errors.New("network connection no.:" + strconv.Itoa(ifaceId)+ " contains invalid number of network references:" + strconv.Itoa(definedNetworks))
+    }
+  }
+  return nil
+}
+
+func setupNetworking(args *cniArgs) (*current.Result, error) {
+  err := preparePodForIpv6(args)
+  if err != nil {
+    return nil, errors.New("failed to prepare Pod for IPv6 due to:" + err.Error())
+  }
+  allocatedDevices := make(map[string]*[]string)
+  syncher := syncher.NewSyncher(len(args.interfaces))
+  danmClient, err := CreateDanmClient(DanmConfig.Kubeconfig)
+  if err != nil {
+    return nil, err
+  }
+  if args.defaultNetwork != nil {
+    syncher.ExpectedNumOfResults++
+    defParam := datastructs.Interface{SequenceId: 0, Ip: "dynamic",}
+    err = createIface(args, danmClient, args.defaultNetwork, defParam, syncher, allocatedDevices)
+    if err != nil {
+      syncher.PushResult(args.defaultNetwork.ObjectMeta.Name, err, nil)
+    }
+  }
+  for nicID, nicParams := range args.interfaces {
+    nicParams.SequenceId = nicID
+    nicParams.DefaultIfaceName = defaultIfName
+    netInfo, err := netcontrol.GetNetworkFromInterface(danmClient, nicParams, args.pod.ObjectMeta.Namespace)
+    if err != nil {
+      syncher.PushResult("", errors.New("failed to get network object for Pod:" + args.pod.ObjectMeta.Name +
+                             "'s connection no.:" + strconv.Itoa(nicID) + " due to:" + err.Error()), nil)
+      continue
+    }
+    err = createIface(args, danmClient, netInfo, nicParams, syncher, allocatedDevices)
+    if err != nil {
+      syncher.PushResult(netInfo.ObjectMeta.Name, err, nil)
+      continue
+    }
+  }
+  err = syncher.GetAggregatedResult()
+  return syncher.MergeCniResults(), err
+}
+
+func preparePodForIpv6(args *cniArgs) error {
+  runtime.LockOSThread()
+  defer runtime.UnlockOSThread()
+  // save the current namespace
+  origNs, err := ns.GetCurrentNS()
+  if err != nil {
+    return errors.New("failed to get current network namespace due to:" + err.Error())
+  }
+  // enter to the Pod's network namespace
+  podNs, err := ns.GetNS(args.netns)
+  if err != nil {
+    return errors.New("failed to get Pod's network namespace due to:" + err.Error())
+  }
+  err = podNs.Set()
+  if err != nil {
+    return errors.New("failed to switch to Pod's network namespace due to:" + err.Error())
+  }
+  defer func() {
+    podNs.Close()
+    origNs.Set()
+  }()
+  // set sysctl
+  _, err = sysctl.Sysctl("net.ipv6.conf.all.disable_ipv6", "0")
+  if err != nil {
+    return errors.New("failed to set sysctl due to:" + err.Error())
+  }
+  return nil
+}
+
+func createIface(args *cniArgs, danmClient danmclientset.Interface, netInfo *danmtypes.DanmNet, nicParams datastructs.Interface, syncher *syncher.Syncher, allocatedDevices map[string]*[]string) error {
+  if !isTenantAllowed(args, netInfo) {
+    return errors.New("Pod:" + args.pod.ObjectMeta.Name + "'s namespace:" + args.pod.ObjectMeta.Namespace + " is not in the AllowedTenants whitelist of network:" + netInfo.ObjectMeta.Name)
+  }
+  var err error
+  if cnidel.IsDelegationRequired(netInfo) {
+    if cnidel.IsDeviceNeeded(netInfo.Spec.NetworkType) {
+      if _, ok := allocatedDevices[netInfo.Spec.Options.DevicePool]; !ok {
+        checkpoint, err := checkpoint_utils.GetCheckpoint()
+        if err != nil {
+          return errors.New("failed to instantiate checkpoint object due to:" + err.Error())
+        }
+        allocatedDevices[netInfo.Spec.Options.DevicePool], err = getAllocatedDevices(args, checkpoint, netInfo.Spec.Options.DevicePool)
+        if err != nil {
+          return errors.New("failed to get allocated devices due to:" + err.Error())
+        }
+      }
+      nicParams.Device, err = popDevice(netInfo.Spec.Options.DevicePool, allocatedDevices)
+      if err != nil {
+        return errors.New("failed to pop devices due to:" + err.Error())
+      }
+    }
+    go createDelegatedInterface(syncher, danmClient, nicParams, netInfo, args)
+  } else {
+    go createDanmInterface(syncher, danmClient, nicParams, netInfo, args)
+  }
+  return nil
+}
+
+func isTenantAllowed(args *cniArgs, netInfo *danmtypes.DanmNet) bool {
+  if len(netInfo.Spec.AllowedTenants) == 0 {
+    return true
+  }
+  var isTenantAllowed bool
+  for _, tenantName := range netInfo.Spec.AllowedTenants {
+    if tenantName == args.pod.ObjectMeta.Namespace {
+      isTenantAllowed = true
+      break
+    }
+  }
+  return isTenantAllowed
+}
+
+func getAllocatedDevices(args *cniArgs, checkpoint multus_types.ResourceClient, devicePool string)(*[]string, error){
+  resourceMap, err := checkpoint.GetPodResourceMap(args.pod)
+  if err != nil {
     return nil, errors.New("failed to retrieve Pod info from checkpoint object due to:" + err.Error())
+  }
+  if len(resourceMap) == 0 {
+    return nil, errors.New("there were no Devices allocated for the Pod")
   }
   if _, ok := resourceMap[devicePool]; !ok {
     return nil, errors.New("failed to retrieve resources of DevicePool")
@@ -207,114 +353,96 @@ func popDevice(devicePool string, allocatedDevices map[string]*[]string)(string,
   return device, nil
 }
 
-func setupNetworking(args *cniArgs) (*current.Result, error) {
-  danmClient, err := createDanmClient(args.stdIn)
-  if err != nil {
-    return nil, errors.New("failed to create DanmClient due to:" + err.Error())
-  }
-  syncher := syncher.NewSyncher(len(args.interfaces))
-  allocatedDevices := make(map[string]*[]string)
-
-  checkpoint, err := checkpoint_utils.GetCheckpoint()
-  if err != nil {
-    return nil, errors.New("failed to instantiate checkpoint object due to:" + err.Error())
-  }
-  var cniRes *current.Result
-  for nicID, nicParams := range args.interfaces {
-    isDelegationRequired, netInfo, err := cnidel.IsDelegationRequired(danmClient, nicParams.Network, args.nameSpace)
-    if err != nil {
-      return cniRes, errors.New("failed to get DanmNet due to:" + err.Error())
-    }
-    nicParams.DefaultIfaceName = "eth" + strconv.Itoa(nicID)
-    if isDelegationRequired {
-      if cnidel.IsDeviceNeeded(netInfo.Spec.NetworkType) {
-        if _, ok := allocatedDevices[netInfo.Spec.Options.DevicePool]; !ok {
-          allocatedDevices[netInfo.Spec.Options.DevicePool], err = getAllocatedDevices(args, checkpoint, netInfo.Spec.Options.DevicePool)
-          if err != nil {
-            return cniRes, errors.New("failed to get allocated devices due to:" + err.Error())
-          }
-        }
-        nicParams.Device, err = popDevice(netInfo.Spec.Options.DevicePool, allocatedDevices)
-        if err != nil {
-          return cniRes, errors.New("failed to pop devices due to:" + err.Error())
-        }
-      }
-      go createDelegatedInterface(syncher, danmClient, nicParams, netInfo, args)
-    } else {
-      go createDanmInterface(syncher, danmClient, nicParams, netInfo, args)
-    }
-  }
-  err = syncher.GetAggregatedResult()
-  return syncher.MergeCniResults(), err
-}
-
-func createDelegatedInterface(syncher *syncher.Syncher, danmClient danmclientset.Interface, iface danmtypes.Interface, netInfo *danmtypes.DanmNet, args *cniArgs) {
+func createDelegatedInterface(syncher *syncher.Syncher, danmClient danmclientset.Interface, iface datastructs.Interface, netInfo *danmtypes.DanmNet, args *cniArgs) {
   epIfaceSpec := danmtypes.DanmEpIface {
-    Name:        cnidel.CalculateIfaceName(netInfo.Spec.Options.Prefix, iface.DefaultIfaceName),
+    Name:        cnidel.CalculateIfaceName(DanmConfig.NamingScheme, netInfo.Spec.Options.Prefix, iface.DefaultIfaceName, iface.SequenceId),
     Address:     iface.Ip,
     AddressIPv6: iface.Ip6,
     Proutes:     iface.Proutes,
     Proutes6:    iface.Proutes6,
-    DeviceID:  iface.Device,
+    DeviceID:    iface.Device,
   }
-  ep, err := createDanmEp(epIfaceSpec, netInfo.Spec.NetworkID, netInfo.Spec.NetworkType, args)
+  ep, err := createDanmEp(epIfaceSpec, netInfo, args)
   if err != nil {
-    syncher.PushResult(iface.Network, errors.New("DanmEp object could not be created due to error:" + err.Error()), nil)
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("DanmEp object could not be created due to error:" + err.Error()), nil)
+    return
   }
-  delegatedResult,err := cnidel.DelegateInterfaceSetup(danmClient, netInfo, &ep)
+  delegatedResult,err := cnidel.DelegateInterfaceSetup(DanmConfig, danmClient, netInfo, &ep)
   if err != nil {
-    syncher.PushResult(iface.Network, errors.New("CNI delegation failed due to error:" + err.Error()), nil)
+    cnidel.FreeDelegatedIps(danmClient, netInfo, ep.Spec.Iface.Address, ep.Spec.Iface.AddressIPv6)
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("CNI delegation failed due to error:" + err.Error()), nil)
+    return
   }
-  err = putDanmEp(args, ep)
+  err = danmep.PostProcessInterface(ep, netInfo)
   if err != nil {
-    syncher.PushResult(iface.Network, errors.New("DanmEp object could not be PUT to K8s due to error:" + err.Error()), nil)
+    cnidel.FreeDelegatedIps(danmClient, netInfo, ep.Spec.Iface.Address, ep.Spec.Iface.AddressIPv6)
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("Post-processing failed for interface:" + ep.Spec.Iface.Name + " because:" + err.Error()), nil)
+    return
   }
-  syncher.PushResult(iface.Network, nil, delegatedResult)
+  err = danmep.PutDanmEp(danmClient, ep)
+  if err != nil {
+    cnidel.FreeDelegatedIps(danmClient, netInfo, ep.Spec.Iface.Address, ep.Spec.Iface.AddressIPv6)
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("DanmEp object could not be PUT to K8s due to error:" + err.Error()), nil)
+    return
+  }
+  syncher.PushResult(netInfo.ObjectMeta.Name, nil, delegatedResult)
 }
 
-func createDanmInterface(syncher *syncher.Syncher, danmClient danmclientset.Interface, iface danmtypes.Interface, netInfo *danmtypes.DanmNet, args *cniArgs) {
-  netId := netInfo.Spec.NetworkID
+func createDanmInterface(syncher *syncher.Syncher, danmClient danmclientset.Interface, iface datastructs.Interface, netInfo *danmtypes.DanmNet, args *cniArgs) {
   ip4, ip6, macAddr, err := ipam.Reserve(danmClient, *netInfo, iface.Ip, iface.Ip6)
   if err != nil {
-    syncher.PushResult(iface.Network, errors.New("IP address reservation failed for network:" + netId + " with error:" + err.Error()), nil)
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("IP address reservation failed for network:" + netInfo.ObjectMeta.Name + " with error:" + err.Error()), nil)
+    return
   }
+  //As netInfo is only copied to IPAM above, the IP allocation is not refreshed in the original copy.
+  //Without re-reading the network body we risk leaking IPs if an error happens later on within the same thread!
+  netInfo,_ = netcontrol.GetNetworkFromInterface(danmClient, iface, netInfo.ObjectMeta.Namespace)
   epSpec := danmtypes.DanmEpIface {
-    Name: cnidel.CalculateIfaceName(netInfo.Spec.Options.Prefix, iface.DefaultIfaceName),
-    Address: ip4,
+    Name: cnidel.CalculateIfaceName(DanmConfig.NamingScheme, netInfo.Spec.Options.Prefix, iface.DefaultIfaceName, iface.SequenceId),
+    Address:     ip4,
     AddressIPv6: ip6,
-    MacAddress: macAddr,
-    Proutes: iface.Proutes,
-    Proutes6: iface.Proutes6,
+    MacAddress:  macAddr,
+    Proutes:     iface.Proutes,
+    Proutes6:    iface.Proutes6,
   }
-  networkType := "ipvlan"
-  ep, err := createDanmEp(epSpec, netId, networkType, args)
+  ep, err := createDanmEp(epSpec, netInfo, args)
   if err != nil {
     ipam.GarbageCollectIps(danmClient, netInfo, ip4, ip6)
-    syncher.PushResult(iface.Network, errors.New("DanmEp object could not be created due to error:" + err.Error()), nil)
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("DanmEp object could not be created due to error:" + err.Error()), nil)
+    return
   }
-  err = putDanmEp(args, ep)
+  err = danmep.PutDanmEp(danmClient, ep)
   if err != nil {
     ipam.GarbageCollectIps(danmClient, netInfo, ip4, ip6)
-    syncher.PushResult(iface.Network, errors.New("EP could not be PUT into K8s due to error:" + err.Error()), nil)
-  } 
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("EP could not be PUT into K8s due to error:" + err.Error()), nil)
+    return
+  }
   err = danmep.AddIpvlanInterface(netInfo, ep)
   if err != nil {
     ipam.GarbageCollectIps(danmClient, netInfo, ip4, ip6)
-    deleteEp(danmClient, ep)
-    syncher.PushResult(iface.Network, errors.New("IPVLAN interface could not be created due to error:" + err.Error()), nil)
-  } 
+    danmClient.DanmV1().DanmEps(ep.ObjectMeta.Namespace).Delete(ep.ObjectMeta.Name, &meta_v1.DeleteOptions{})
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("IPVLAN interface could not be created due to error:" + err.Error()), nil)
+    return
+  }
+  err = danmep.PostProcessInterface(ep, netInfo)
+  if err != nil {
+    ipam.GarbageCollectIps(danmClient, netInfo, ip4, ip6)
+    danmClient.DanmV1().DanmEps(ep.ObjectMeta.Namespace).Delete(ep.ObjectMeta.Name, &meta_v1.DeleteOptions{})
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("Sysctls could not be set due to error:" + err.Error()), nil)
+    return
+  }
   danmResult := &current.Result{}
-  addIfaceToResult(ep.Spec.EndpointID, epSpec.MacAddress, args.containerId, danmResult)
+  AddIfaceToResult(ep.Spec.EndpointID, epSpec.MacAddress, args.containerId, danmResult)
   if (ip4 != "") {
-    addIpToResult(ip4,"4",danmResult)
+    AddIpToResult(ip4,"4",danmResult)
   }
   if (ip6 != "") {
-    addIpToResult(ip6,"6",danmResult)
+    AddIpToResult(ip6,"6",danmResult)
   }
-  syncher.PushResult(iface.Network, nil, danmResult)
+  syncher.PushResult(netInfo.ObjectMeta.Name, nil, danmResult)
 }
 
-func createDanmEp(epInput danmtypes.DanmEpIface, netId string, neType string, args *cniArgs) (danmtypes.DanmEp, error) {
+func createDanmEp(epInput danmtypes.DanmEpIface, netInfo *danmtypes.DanmNet, args *cniArgs) (danmtypes.DanmEp, error) {
   epidInt, err := uuid.NewV4()
   if err != nil {
     return danmtypes.DanmEp{}, errors.New("uuid.NewV4 returned error during EP creation:" + err.Error())
@@ -324,48 +452,39 @@ func createDanmEp(epInput danmtypes.DanmEpIface, netId string, neType string, ar
   if err != nil {
     return danmtypes.DanmEp{}, errors.New("OS.Hostname returned error during EP creation:" + err.Error())
   }
+  if netInfo.Spec.NetworkType == "" {
+    netInfo.Spec.NetworkType = "ipvlan"
+  }
   epSpec := danmtypes.DanmEpSpec {
-    NetworkID: netId,
-    NetworkType: neType,
-    EndpointID: epid,
-    Iface: epInput,
-    Host: host,
-    Pod: args.podId,
-    CID: args.containerId,
-    Netns: args.netns,
-    Creator: "danm",
+    NetworkName: netInfo.ObjectMeta.Name,
+    NetworkType: netInfo.Spec.NetworkType,
+    EndpointID:  epid,
+    Iface:       epInput,
+    Host:        host,
+    Pod:         args.podId,
+    CID:         args.containerId,
+    Netns:       args.netns,
+    ApiType:     netInfo.TypeMeta.Kind,
   }
   meta := meta_v1.ObjectMeta {
     Name: epid,
     Namespace: args.nameSpace,
     ResourceVersion: "",
-    Labels: args.labels,
+    Labels: args.pod.Labels,
   }
   typeMeta := meta_v1.TypeMeta {
-      APIVersion: danmtypes.SchemeGroupVersion.String(), 
+      APIVersion: danmtypes.SchemeGroupVersion.String(),
       Kind: "DanmEp",
   }
   ep := danmtypes.DanmEp{
     TypeMeta: typeMeta,
     ObjectMeta: meta,
-    Spec: epSpec, 
+    Spec: epSpec,
   }
   return ep, nil
 }
 
-func putDanmEp(args *cniArgs, ep danmtypes.DanmEp) error {
-  danmClient, err := createDanmClient(args.stdIn)
-  if err != nil {
-    return err
-  }
-  _, err = danmClient.DanmV1().DanmEps(ep.Namespace).Create(&ep)
-  if err != nil {
-    return err
-  }
-  return nil
-}
-
-func addIfaceToResult(epid string, macAddress string, sandBox string, cniResult *current.Result) {
+func AddIfaceToResult(epid string, macAddress string, sandBox string, cniResult *current.Result) {
   iface := &current.Interface{
     Name: epid,
     Mac: macAddress,
@@ -374,7 +493,7 @@ func addIfaceToResult(epid string, macAddress string, sandBox string, cniResult 
   cniResult.Interfaces = append(cniResult.Interfaces, iface)
 }
 
-func addIpToResult(ip string, version string, cniResult *current.Result) {
+func AddIpToResult(ip string, version string, cniResult *current.Result) {
   if ip != "" {
     ip, _ := types.ParseCIDR(ip)
     ipConf := &current.IPConfig {
@@ -392,7 +511,12 @@ func DeleteInterfaces(args *skel.CmdArgs) error {
     log.Println("INFO: DEL: CNI args could not be loaded because" + err.Error())
     return nil
   }
-  danmClient, err := createDanmClient(cniArgs.stdIn)
+  err = loadNetConf(cniArgs.stdIn)
+  if err != nil {
+    log.Println("INFO: DEL: cannot load DANM CNI config due to error:" + err.Error())
+    return nil
+  }
+  danmClient, err := CreateDanmClient(DanmConfig.Kubeconfig)
   if err != nil {
     log.Println("INFO: DEL: DanmEp REST client could not be created because" + err.Error())
     return nil
@@ -404,7 +528,7 @@ func DeleteInterfaces(args *skel.CmdArgs) error {
   }
   syncher := syncher.NewSyncher(len(eplist))
   for _, ep := range eplist {
-    go deleteInterface(cniArgs, syncher, ep)
+    go deleteInterface(danmClient, cniArgs, syncher, ep)
   }
   deleteErrors := syncher.GetAggregatedResult()
   if deleteErrors != nil {
@@ -413,55 +537,46 @@ func DeleteInterfaces(args *skel.CmdArgs) error {
   return nil
 }
 
-func deleteInterface(args *cniArgs, syncher *syncher.Syncher, ep danmtypes.DanmEp) {
-  danmClient, err := createDanmClient(args.stdIn)
-  if err != nil {
-    syncher.PushResult(ep.Spec.NetworkID, errors.New("failed to create danmClient:" + err.Error()), nil)
-    return
-  }
-  netInfo, err := danmClient.DanmV1().DanmNets(args.nameSpace).Get(ep.Spec.NetworkID, meta_v1.GetOptions{})
-  if err != nil {
-    syncher.PushResult(ep.Spec.NetworkID, errors.New("failed to get DanmNet:"+ err.Error()), nil)
-    return
-  }
+func deleteInterface(danmClient danmclientset.Interface, args *cniArgs, syncher *syncher.Syncher, ep danmtypes.DanmEp) {
+  //During delete we are not that interested in errors, but we also can't just return yet.
+  //We need to try and clean-up as many remaining resources as possible
   var aggregatedError string
-  err = deleteNic(danmClient, netInfo, ep)
-  //It can happen that a container was already destroyed at this point in this fully asynch world
-  //So we are not interested in errors, but we also can't just return yet, we need to try and clean-up remaining resources, if, any
+  netInfo, err := netcontrol.GetNetworkFromEp(danmClient, ep)
   if err != nil {
-    aggregatedError += "failed to delete container NIC:" + err.Error() + "; "
+    aggregatedError += "failed to get network:"+ err.Error() + "; "
   }
-  err = deleteEp(danmClient, ep)
+  if netInfo != nil {
+    err = deleteNic(danmClient, netInfo, ep)
+    if err != nil {
+      aggregatedError += "failed to delete container NIC:" + err.Error() + "; "
+    }
+  }
+  err = danmClient.DanmV1().DanmEps(ep.ObjectMeta.Namespace).Delete(ep.ObjectMeta.Name, &meta_v1.DeleteOptions{})
   if err != nil {
     aggregatedError += "failed to delete DanmEp:" + err.Error() + "; "
   }
   if aggregatedError != "" {
-    syncher.PushResult(ep.Spec.NetworkID, errors.New(aggregatedError), nil)
+    syncher.PushResult(ep.Spec.NetworkName, errors.New(aggregatedError), nil)
   } else {
-    syncher.PushResult(ep.Spec.NetworkID, nil, nil)
+    syncher.PushResult(ep.Spec.NetworkName, nil, nil)
   }
 }
 
 func deleteNic(danmClient danmclientset.Interface, netInfo *danmtypes.DanmNet, ep danmtypes.DanmEp) error {
   var err error
   if ep.Spec.NetworkType != "ipvlan" {
-    err = cnidel.DelegateInterfaceDelete(danmClient, netInfo, &ep)
+    err = cnidel.DelegateInterfaceDelete(DanmConfig, danmClient, netInfo, &ep)
   } else {
     err = deleteDanmNet(danmClient, ep, netInfo)
   }
   return err
 }
 
-func deleteEp(danmClient danmclientset.Interface, ep danmtypes.DanmEp) error {
-  delOpts := meta_v1.DeleteOptions{}
-  err := danmClient.DanmV1().DanmEps(ep.ObjectMeta.Namespace).Delete(ep.ObjectMeta.Name, &delOpts)
-  if err != nil {
-    return err
-  }
-  return nil
-}
-
 func deleteDanmNet(danmClient danmclientset.Interface, ep danmtypes.DanmEp, netInfo *danmtypes.DanmNet) error {
   ipam.GarbageCollectIps(danmClient, netInfo, ep.Spec.Iface.Address, ep.Spec.Iface.AddressIPv6)
   return danmep.DeleteIpvlanInterface(ep)
+}
+
+func GetInterfaces(args *skel.CmdArgs) error {
+  return nil
 }

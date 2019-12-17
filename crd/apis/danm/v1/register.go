@@ -32,6 +32,12 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DanmEpList{},
 		&DanmNet{},
 		&DanmNetList{},
+		&ClusterNetwork{},
+		&ClusterNetworkList{},
+		&TenantNetwork{},
+		&TenantNetworkList{},
+		&TenantConfig{},
+		&TenantConfigList{},
 	)
 	meta_v1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

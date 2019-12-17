@@ -1,12 +1,12 @@
-hash: 6c91bced63f459ae044e0edd62341fea3b537100c19f8e3b64a863407d165745
-updated: 2019-02-22T08:57:35.242417881+01:00
+hash: aa386d47de4210547ee89573057b83178ae6f7f4b1dd1df33f0cde11cf69b228
+updated: 2019-09-27T17:53:22.774886331+02:00
 imports:
 - name: github.com/apparentlymart/go-cidr
   version: 2bd8b58cf4275aeb086ade613de226773e29e853
   subpackages:
   - cidr
 - name: github.com/containernetworking/cni
-  version: a7885cb6f8ab03fba07852ded351e4f5e7a112bf
+  version: 4cfb7b568922a3c79a23e438dc52fe537fc9687e
   subpackages:
   - libcni
   - pkg/invoke
@@ -16,9 +16,10 @@ imports:
   - pkg/types/current
   - pkg/version
 - name: github.com/containernetworking/plugins
-  version: a686cc4bd84f77d93115f6f3e0ec894d55be178e
+  version: fe60fcddb897079746ec1523fd1837ab05b1e689
   subpackages:
   - pkg/ns
+  - pkg/utils/sysctl
 - name: github.com/davecgh/go-spew
   version: 782f4967f2dc4564575ca782fe2d04090b5faca8
   subpackages:
@@ -65,15 +66,18 @@ imports:
 - name: github.com/imdario/mergo
   version: 6633656539c1639d9d78127b7d47c622b5d7b6dc
 - name: github.com/intel/multus-cni
-  version: 8bf358071ab54b8f38d10027ccf81a29dfb78b3d
+  version: e723aabca8792ddd181167660e252a127a81b073
   subpackages:
   - checkpoint
   - logging
   - types
 - name: github.com/intel/sriov-cni
-  version: a87cb21e2f4aadedec7021eefa45523af51071ac
+  version: 365c8f8cc1204df84f3e976ea30f113e733ca665
   subpackages:
+  - pkg/types
   - pkg/utils
+- name: github.com/j-keck/arping
+  version: 2cf9dc699c5640a7e2c81403a44127bf28033600
 - name: github.com/json-iterator/go
   version: f2b4162afba35581b6d4a50d3b8f34e33c144682
 - name: github.com/modern-go/concurrent
@@ -83,7 +87,7 @@ imports:
 - name: github.com/peterbourgon/diskv
   version: 5f041e8faa004a95c88a202771f4cc3e991971e6
 - name: github.com/pkg/errors
-  version: 856c240a51a2bf8fb8269ea7f3f9b046aadde36e
+  version: 645ef00459ed84a119197bfb8d8205042c6df63d
 - name: github.com/satori/go.uuid
   version: 36e9d2ebbde5e3f13ab2e25625fd453271d6522e
 - name: github.com/spf13/pflag
@@ -93,9 +97,10 @@ imports:
   subpackages:
   - ssh/terminal
 - name: golang.org/x/net
-  version: 1c05540f6879653db88113bc4a2b70aec4bd491f
+  version: 0ed95abb35c445290478a5348a7b38bb154135fd
   subpackages:
   - context
+  - context/ctxhttp
   - http2
   - http2/hpack
   - idna
@@ -121,8 +126,9 @@ imports:
 - name: gopkg.in/yaml.v2
   version: 670d4cfef0544295bc27a114dbac37980d83185a
 - name: k8s.io/api
-  version: 072894a440bdee3a891dea811fe42902311cd2a3
+  version: f1b257a4ce9632d2f06a58c3417d1523149bc94d
   subpackages:
+  - admission/v1beta1
   - admissionregistration/v1alpha1
   - admissionregistration/v1beta1
   - apps/v1
@@ -141,6 +147,7 @@ imports:
   - core/v1
   - events/v1beta1
   - extensions/v1beta1
+  - imagepolicy/v1alpha1
   - networking/v1
   - policy/v1beta1
   - rbac/v1
@@ -153,11 +160,16 @@ imports:
   - storage/v1alpha1
   - storage/v1beta1
 - name: k8s.io/apimachinery
-  version: 103fd098999dc9c0c88536f5c9ad2e5da39373ae
+  version: c182ff3b98419e7305cc361fd1811988591656cf
   subpackages:
+  - pkg/api/equality
   - pkg/api/errors
   - pkg/api/meta
   - pkg/api/resource
+  - pkg/api/testing
+  - pkg/api/testing/fuzzer
+  - pkg/api/testing/roundtrip
+  - pkg/apis/meta/fuzzer
   - pkg/apis/meta/internalversion
   - pkg/apis/meta/v1
   - pkg/apis/meta/v1/unstructured
@@ -181,10 +193,13 @@ imports:
   - pkg/util/diff
   - pkg/util/errors
   - pkg/util/framer
+  - pkg/util/httpstream
+  - pkg/util/httpstream/spdy
   - pkg/util/intstr
   - pkg/util/json
   - pkg/util/mergepatch
   - pkg/util/net
+  - pkg/util/remotecommand
   - pkg/util/runtime
   - pkg/util/sets
   - pkg/util/strategicpatch
@@ -195,9 +210,10 @@ imports:
   - pkg/version
   - pkg/watch
   - third_party/forked/golang/json
+  - third_party/forked/golang/netutil
   - third_party/forked/golang/reflect
 - name: k8s.io/client-go
-  version: 7d04d0e2a0a1a4d4a1cd6baa432a2301492e4e65
+  version: 3ec0d5188431b312d6b3d5b6e46e022d5c0843a4
   subpackages:
   - discovery
   - discovery/fake
@@ -327,8 +343,14 @@ imports:
   - util/integer
   - util/retry
   - util/workqueue
+- name: k8s.io/klog
+  version: 8139d8cb77af419532b33dfa7dd09fbc5f1d344f
 - name: k8s.io/kube-openapi
   version: 91cfa479c814065e420cee7ed227db0f63a5854e
   subpackages:
   - pkg/util/proto
+- name: k8s.io/kubernetes
+  version: ddf47ac13c1a9483ea035a79cd7c10005ff21a6d
+  subpackages:
+  - pkg/kubelet/cm/cpuset
 testImports: []

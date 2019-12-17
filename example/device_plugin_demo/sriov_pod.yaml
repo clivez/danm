@@ -16,6 +16,7 @@ spec:
   containers:
   - name: sriov-pod
     image: busybox:latest
+    imagePullPolicy: IfNotPresent
     args:
       - sleep
       - "1000"
@@ -26,5 +27,3 @@ spec:
       limits:
         nokia.k8s.io/sriov_ens1f0: '1'
         nokia.k8s.io/sriov_ens1f1: '1'
-  nodeSelector:
-    sriov: enabled

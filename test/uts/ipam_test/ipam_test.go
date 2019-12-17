@@ -1,30 +1,30 @@
 package ipam_test
 
 import (
-  "net"
   "os"
+  "strconv"
   "strings"
   "testing"
   danmtypes "github.com/nokia/danm/crd/apis/danm/v1"
-  "github.com/nokia/danm/pkg/bitarray"
   "github.com/nokia/danm/pkg/ipam"
-  "github.com/nokia/danm/pkg/netcontrol"
-  "github.com/nokia/danm/test/stubs"
+  stubs "github.com/nokia/danm/test/stubs/danm"
+  "github.com/nokia/danm/test/utils"
+  meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var testNets = []danmtypes.DanmNet {
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "emptyVal", }},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "falseVal", Validation: false}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "trueVal", Validation: true}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "cidr", Validation: true, Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "fullIpv4", Validation: true, Options: danmtypes.DanmNetOption{Cidr: "192.168.1.0/30"}}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "net6", Validation: true, Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/64", Cidr: "192.168.1.64/26",}}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "smallNet6", Validation: true, Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/69"}}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "conflict", Validation: true, Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/64"}}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "conflicterror", Validation: true, Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/64"}}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "conflictFree", Validation: true, Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "conflicterrorFree", Validation: true, Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
-  danmtypes.DanmNet {Spec: danmtypes.DanmNetSpec{NetworkID: "error", Validation: true, Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "l2"},Spec: danmtypes.DanmNetSpec{NetworkID: "l2"}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "cidr"},Spec: danmtypes.DanmNetSpec{NetworkID: "cidr", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "fullIpv4"},Spec: danmtypes.DanmNetSpec{NetworkID: "fullIpv4", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.0/30"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "net6"},Spec: danmtypes.DanmNetSpec{NetworkID: "net6", Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/64", Cidr: "192.168.1.64/26",}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "smallNet6"},Spec: danmtypes.DanmNetSpec{NetworkID: "smallNet6", Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/69"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "conflict"},Spec: danmtypes.DanmNetSpec{NetworkID: "conflict", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "conflicterror"},Spec: danmtypes.DanmNetSpec{NetworkID: "conflicterror", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "fullconflictFree"},Spec: danmtypes.DanmNetSpec{NetworkID: "fullconflictFree", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "fullconflicterrorFree"},Spec: danmtypes.DanmNetSpec{NetworkID: "fullconflicterrorFree", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "fullerror"},Spec: danmtypes.DanmNetSpec{NetworkID: "error", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "error"},Spec: danmtypes.DanmNetSpec{NetworkID: "error", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
+  danmtypes.DanmNet {ObjectMeta: meta_v1.ObjectMeta {Name: "staticFirst"},Spec: danmtypes.DanmNetSpec{NetworkID: "cidr", Options: danmtypes.DanmNetOption{Cidr: "192.168.1.64/26"}}},
 }
 
 var reserveTcs = []struct {
@@ -36,38 +36,37 @@ var reserveTcs = []struct {
   expectedIp6 string
   isErrorExpected bool
   isMacExpected bool
+  timesUpdateShouldBeCalled int
 }{
-  {"emptyVal", 0, "", "", "", "", true, false},
-  {"falseVal", 1, "", "", "", "", true, false},
-  {"noIpsRequested", 2, "", "", "", "", false, true},
-  {"noneIPv4", 2, "none", "", "", "", false, true},
-  {"noneIPv6", 2, "", "none", "", "", false, true},
-  {"noneDualStack", 2, "none", "none", "", "", false, true},
-  {"dynamicErrorIPv4", 2, "dynamic", "", "", "", true, false},
-  {"dynamicErrorIPv6", 2, "", "dynamic", "", "", true, false},
-  {"dynamicErrorDualStack", 2, "dynamic", "dynamic", "", "", true, false},
-  {"dynamicIPv4Success", 3, "dynamic", "", "192.168.1.65/26", "", false, true},
-  {"dynamicIPv4Exhausted", 4, "dynamic", "", "", "", true, false},
-  {"staticInvalidIPv4", 4, "hululululu", "", "", "", true, false},
-  {"staticInvalidNoCidrIPv4", 4, "192.168.1.1", "", "", "", true, false},
-  {"staticL2IPv4", 2, "192.168.1.1/26", "", "", "", true, false},
-  {"staticNetmaskMismatchIPv4", 4, "192.168.1.1/32", "", "", "", true, false},
-  {"staticAlreadyUsedIPv4", 4, "192.168.1.2/30", "", "", "", true, false},
-  {"staticSuccessLastIPv4", 3, "192.168.1.126/26", "", "192.168.1.126/26", "", false, true},
-  {"staticSuccessFirstIPv4", 3, "192.168.1.65/26", "", "192.168.1.65/26", "", false, true},
-  {"staticFailAfterLastIPv4", 3, "192.168.1.127/26", "", "", "", true, false},
-  {"staticFailBeforeFirstIPv4", 3, "192.168.1.64/26", "", "", "", true, false},
-  {"dynamicIPv6Success", 5, "", "dynamic", "", "2a00:8a00:a000:1193", false, true},
-  {"dynamicNotSupportedCidrSizeIPv6", 6, "", "dynamic", "", "", true, false}, //basically anything smaller than /64. Restriction must be fixed some day!
-  {"staticL2IPv6", 4, "", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", "", "", true, false},
-  {"staticInvalidIPv6", 5, "", "2a00:8a00:a000:1193:hulu:lulu:lulu:lulu/64", "", "", true, false},
-  {"staticNetmaskMismatchIPv6", 5, "", "2a00:8a00:a000:2193:f816:3eff:fe24:e348/64", "", "", true, false},
-  {"staticIPv6Success", 5, "", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", "", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", false, false},
-  {"dynamicDualStackSuccess", 5, "dynamic", "dynamic", "192.168.1.65/26", "2a00:8a00:a000:1193", false, true},
-  {"staticDualStackSuccess", 5, "192.168.1.115/26", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", "192.168.1.115/26", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", false, true},
-  {"resolvedConflictDuringUpdate", 7, "", "dynamic", "", "2a00:8a00:a000:1193", false, true},
-  {"unresolvedConflictDuringUpdate", 8, "", "dynamic", "", "", true, false},
-  {"errorUpdate", 11, "", "dynamic", "", "", true, false},
+  {"noIpsRequested", 0, "", "", "", "", false, true, 0},
+  {"noneIPv4", 0, "none", "", "", "", false, true, 0},
+  {"noneIPv6", 0, "", "none", "", "", false, true, 0},
+  {"noneDualStack", 0, "none", "none", "", "", false, true, 0},
+  {"dynamicErrorIPv4", 0, "dynamic", "", "", "", true, false, 0},
+  {"dynamicErrorIPv6", 0, "", "dynamic", "", "", true, false, 0},
+  {"dynamicErrorDualStack", 0, "dynamic", "dynamic", "", "", true, false, 0},
+  {"dynamicIPv4Success", 1, "dynamic", "", "192.168.1.65/26", "", false, true, 1},
+  {"dynamicIPv4Exhausted", 2, "dynamic", "", "", "", true, false, 0},
+  {"staticInvalidIPv4", 2, "hululululu", "", "", "", true, false, 0},
+  {"staticInvalidNoCidrIPv4", 2, "192.168.1.1", "", "", "", true, false, 0},
+  {"staticL2IPv4", 0, "192.168.1.1/26", "", "", "", true, false, 0},
+  {"staticNetmaskMismatchIPv4", 2, "192.168.1.1/32", "", "", "", true, false, 0},
+  {"staticAlreadyUsedIPv4", 2, "192.168.1.2/30", "", "", "", true, false, 0},
+  {"staticSuccessLastIPv4", 1, "192.168.1.126/26", "", "192.168.1.126/26", "", false, true, 1},
+  {"staticSuccessFirstIPv4", 11, "192.168.1.65/26", "", "192.168.1.65/26", "", false, true, 1},
+  {"staticFailAfterLastIPv4", 1, "192.168.1.127/26", "", "", "", true, false, 0},
+  {"staticFailBeforeFirstIPv4", 1, "192.168.1.64/26", "", "", "", true, false, 0},
+  {"dynamicIPv6Success", 3, "", "dynamic", "", "2a00:8a00:a000:1193", false, true, 0},
+  {"dynamicNotSupportedCidrSizeIPv6", 4, "", "dynamic", "", "", true, false, 0}, //basically anything smaller than /64. Restriction must be fixed some day!
+  {"staticL2IPv6", 2, "", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", "", "", true, false, 0},
+  {"staticInvalidIPv6", 3, "", "2a00:8a00:a000:1193:hulu:lulu:lulu:lulu/64", "", "", true, false, 0},
+  {"staticNetmaskMismatchIPv6", 3, "", "2a00:8a00:a000:2193:f816:3eff:fe24:e348/64", "", "", true, false, 0},
+  {"staticIPv6Success", 3, "", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", "", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", false, false, 0},
+  {"dynamicDualStackSuccess", 3, "dynamic", "dynamic", "192.168.1.65/26", "2a00:8a00:a000:1193", false, true, 1},
+  {"staticDualStackSuccess", 3, "192.168.1.115/26", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", "192.168.1.115/26", "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", false, true, 1},
+  {"resolvedConflictDuringUpdate", 5, "dynamic", "", "192.168.1.65/26", "", false, true, 2},
+  {"unresolvedConflictAfterUpdate", 6, "dynamic", "", "", "", true, false, 1},
+  {"errorUpdate", 10, "dynamic", "", "", "", true, false, 1},
 }
 
 var freeTcs = []struct {
@@ -75,17 +74,18 @@ var freeTcs = []struct {
   netIndex int
   allocatedIp string
   isErrorExpected bool
+  timesUpdateShouldBeCalled int
 }{
-  {"l2Network", 2, "192.168.1.126/26", false},
-  {"noAssignedIp", 3, "", false},
-  {"successfulFree", 4, "192.168.1.2/30", false},
-  {"noNetmask", 4, "192.168.1.2", false},
-  {"outOfRange", 4, "192.168.1.10/30", false},
-  {"invalidIp", 4, "192.168.hululu/30", false},
-  {"ipv6", 4, "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", false},
-  {"resolvedConflictDuringUpdate", 9, "192.168.1.69/26", false},
-  {"unresolvedConflictDuringUpdate", 10, "192.168.1.69/26", true},
-  {"errorUpdate", 11, "192.168.1.69/26", true},
+  {"l2Network", 0, "192.168.1.126/26", false, 0},
+  {"noAssignedIp", 1, "", false, 0},
+  {"successfulFree", 2, "192.168.1.2/30", false, 1},
+  {"noNetmask", 2, "192.168.1.2", false, 0},
+  {"outOfRange", 2, "192.168.1.10/30", false, 0},
+  {"invalidIp", 2, "192.168.hululu/30", false, 0},
+  {"ipv6", 2, "2a00:8a00:a000:1193:f816:3eff:fe24:e348/64", false, 0},
+  {"resolvedConflictDuringUpdate", 7, "192.168.1.69/26", false, 2},
+  {"unresolvedConflictAfterUpdate", 8, "192.168.1.69/26", true, 1},
+  {"errorUpdate", 9, "192.168.1.69/26", true, 1},
 }
 
 var gcTcs = []struct {
@@ -100,14 +100,15 @@ var gcTcs = []struct {
 }
 
 func TestReserve(t *testing.T) {
-  err := setupAllocationPools(testNets)
+  err := utils.SetupAllocationPools(testNets)
   if err != nil {
     t.Errorf("Allocation pool for testnets could not be set-up because:%v", err)
   }
   for _, tc := range reserveTcs {
     t.Run(tc.netName, func(t *testing.T) {
-      ips := createExpectedAllocationsList(tc.expectedIp4,true,tc.netIndex)
-      netClientStub := stubs.NewClientSetStub(testNets, nil, ips)
+      ips := utils.CreateExpectedAllocationsList(tc.expectedIp4,true,testNets[tc.netIndex].Spec.NetworkID)
+      testArtifacts := utils.TestArtifacts{TestNets: testNets, ReservedIps: ips}
+      netClientStub := stubs.NewClientSetStub(testArtifacts)
       ip4, ip6, mac, err := ipam.Reserve(netClientStub, testNets[tc.netIndex], tc.requestedIp4, tc.requestedIp6)
       if (err != nil && !tc.isErrorExpected) || (err == nil && tc.isErrorExpected) {
         t.Errorf("Received error:%v does not match with expectation", err)
@@ -124,84 +125,56 @@ func TestReserve(t *testing.T) {
       if !strings.HasPrefix(ip6,tc.expectedIp6) {
         t.Errorf("Allocated IP6 address:%s does not prefixed with the expected CIDR:%s", ip6, tc.expectedIp6)
       }
+      var timesUpdateWasCalled int
+      if netClientStub.DanmClient.NetClient != nil {
+        timesUpdateWasCalled = netClientStub.DanmClient.NetClient.TimesUpdateWasCalled
+      }
+      if tc.timesUpdateShouldBeCalled != timesUpdateWasCalled {
+        t.Errorf("Network manifest should have been updated:" + strconv.Itoa(tc.timesUpdateShouldBeCalled) + " times, but it happened:" + strconv.Itoa(timesUpdateWasCalled) + " times instead")
+      }
     })
   }
 }
 
 func TestFree(t *testing.T) {
-  err := setupAllocationPools(testNets)
+  err := utils.SetupAllocationPools(testNets)
   if err != nil {
     t.Errorf("Allocation pool for testnets could not be set-up because:%v", err)
   }
   for _, tc := range freeTcs {
     t.Run(tc.netName, func(t *testing.T) {
-      ips := createExpectedAllocationsList(tc.allocatedIp,false,tc.netIndex)
-      netClientStub := stubs.NewClientSetStub(testNets, nil, ips)
+      ips := utils.CreateExpectedAllocationsList(tc.allocatedIp,false,testNets[tc.netIndex].Spec.NetworkID)
+      testArtifacts := utils.TestArtifacts{TestNets: testNets, ReservedIps: ips}
+      netClientStub := stubs.NewClientSetStub(testArtifacts)
       err := ipam.Free(netClientStub, testNets[tc.netIndex], tc.allocatedIp)
       if (err != nil && !tc.isErrorExpected) || (err == nil && tc.isErrorExpected) {
         t.Errorf("Received error:%v does not match with expectation", err)
         return
+      }
+      var timesUpdateWasCalled int
+      if netClientStub.DanmClient.NetClient != nil {
+        timesUpdateWasCalled = netClientStub.DanmClient.NetClient.TimesUpdateWasCalled
+      }
+      if tc.timesUpdateShouldBeCalled != timesUpdateWasCalled {
+        t.Errorf("Network manifest should have been updated:" + strconv.Itoa(tc.timesUpdateShouldBeCalled) + " times, but it happened:" + strconv.Itoa(timesUpdateWasCalled) + " times instead")
       }
     })
   }
 }
 
 func TestGarbageCollectIps(t *testing.T) {
-  err := setupAllocationPools(testNets)
+  err := utils.SetupAllocationPools(testNets)
   if err != nil {
     t.Errorf("Allocation pool for testnets could not be set-up because:%v", err)
   }
   for _, tc := range gcTcs {
     t.Run(tc.netName, func(t *testing.T) {
-      ips := createExpectedAllocationsList(tc.allocatedIp4,false,tc.netIndex)
-      netClientStub := stubs.NewClientSetStub(testNets, nil, ips)
+      ips := utils.CreateExpectedAllocationsList(tc.allocatedIp4,false,testNets[tc.netIndex].Spec.NetworkID)
+      testArtifacts := utils.TestArtifacts{TestNets: testNets, ReservedIps: ips}
+      netClientStub := stubs.NewClientSetStub(testArtifacts)
       ipam.GarbageCollectIps(netClientStub, &testNets[tc.netIndex], tc.allocatedIp4, tc.allocatedIp6)
     })
   }
-}
-
-func setupAllocationPools(nets []danmtypes.DanmNet) error {
-  for index, net := range nets {
-    if net.Spec.Options.Cidr != "" {
-      bitArray, err := netcontrol.CreateAllocationArray(&net)
-      if err != nil {
-        return err
-      }
-      net.Spec.Options.Alloc = bitArray.Encode()
-      err = netcontrol.ValidateAllocationPool(&net)
-      if err != nil {
-        return err
-      }
-      if strings.HasPrefix(net.Spec.NetworkID, "full") {
-        exhaustNetwork(&net)
-      }
-      testNets[index].Spec = net.Spec
-    }
-  }
-  return nil
-}
-
-func exhaustNetwork(netInfo *danmtypes.DanmNet) {
-    ba := bitarray.NewBitArrayFromBase64(netInfo.Spec.Options.Alloc)
-    _, ipnet, _ := net.ParseCIDR(netInfo.Spec.Options.Cidr)
-    ipnetNum := netcontrol.Ip2int(ipnet.IP)
-    begin := netcontrol.Ip2int(net.ParseIP(netInfo.Spec.Options.Pool.Start)) - ipnetNum
-    end := netcontrol.Ip2int(net.ParseIP(netInfo.Spec.Options.Pool.End)) - ipnetNum
-    for i:=begin;i<=end;i++ {
-        ba.Set(uint32(i))
-    }
-    netInfo.Spec.Options.Alloc = ba.Encode()
-}
-
-func createExpectedAllocationsList(ip string, isExpectedToBeSet bool, index int) []stubs.ReservedIpsList {
-  var ips []stubs.ReservedIpsList
-  if ip != "" {
-    strippedIp := strings.Split(ip, "/")
-    reservation := stubs.Reservation {Ip: strippedIp[0], Set: isExpectedToBeSet,}
-    expectedAllocation := stubs.ReservedIpsList{NetworkId: testNets[index].Spec.NetworkID, Reservations: []stubs.Reservation {reservation,},}
-    ips = append(ips, expectedAllocation)
-  }
-  return ips
 }
 
 func TestMain(m *testing.M) {
