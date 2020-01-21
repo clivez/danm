@@ -7,6 +7,7 @@ import (
   "log"
   "net"
   "os"
+  "time"
   "runtime"
   "strconv"
   "strings"
@@ -364,15 +365,21 @@ func createDelegatedInterface(syncher *syncher.Syncher, danmClient danmclientset
     syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("DanmEp object could not be created due to error:" + err.Error()), nil)
     return
   }
+  err = danmep.PutDanmEp(danmClient, ep)
+  if err != nil {
+    cnidel.FreeDelegatedIps(danmClient, netInfo, ep.Spec.Iface.Address, ep.Spec.Iface.AddressIPv6)
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("DanmEp object could not be PUT to K8s due to error:" + err.Error()), nil)
+    return
+  }
   delegatedResult,err := cnidel.DelegateInterfaceSetup(DanmConfig, danmClient, netInfo, &ep)
   if err != nil {
     syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("CNI delegation failed due to error:" + err.Error()), nil)
     return
   }
-  err = danmep.PutDanmEp(danmClient, ep)
+  err = danmep.UpdateDanmepAddress(danmClient, ep)
   if err != nil {
     cnidel.FreeDelegatedIps(danmClient, netInfo, ep.Spec.Iface.Address, ep.Spec.Iface.AddressIPv6)
-    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("DanmEp object could not be PUT to K8s due to error:" + err.Error()), nil)
+    syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("DanmEp object could not be UPDATE to K8s due to error:" + err.Error()), nil)
     return
   }
   err = danmep.SetDanmEpSysctls(ep)
@@ -514,10 +521,18 @@ func DeleteInterfaces(args *skel.CmdArgs) error {
     log.Println("INFO: DEL: DanmEp REST client could not be created because" + err.Error())
     return nil
   }
-  eplist, err := danmep.FindByCid(danmClient, cniArgs.containerId)
-  if err != nil {
-    log.Println("INFO: DEL: Could not interrogate DanmEps from K8s API server because" + err.Error())
-    return nil
+  var eplist []danmtypes.DanmEp
+  for i := 0; ; i++ {
+    eplist, err = danmep.FindByCid(danmClient, cniArgs.containerId)
+    if err == nil {
+      break
+    }
+    if i >= 10 {
+      log.Println("INFO: DEL: Could not interrogate DanmEps from K8s API server because" + err.Error())
+      return nil
+    }
+    log.Println("INFO: DEL: Could not interrogate DanmEps from K8s API server, will retry later")
+    time.Sleep(2000 * time.Millisecond)
   }
   syncher := syncher.NewSyncher(len(eplist))
   for _, ep := range eplist {

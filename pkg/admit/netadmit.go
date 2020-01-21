@@ -75,7 +75,7 @@ func getNetworkManifest(objectToReview []byte) (*danmtypes.DanmNet,error) {
   }
   decoder := json.NewDecoder(bytes.NewReader(objectToReview))
   //We are using Decoder interface, because it can notify us if any unknown fields were put into the object
-  decoder.DisallowUnknownFields()
+  //decoder.DisallowUnknownFields()
   err := decoder.Decode(&networkManifest)
   if err != nil {
     return nil, errors.New("ERROR: unknown fields are not allowed:" + err.Error())
