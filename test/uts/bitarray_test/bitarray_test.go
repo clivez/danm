@@ -1,35 +1,46 @@
 package bitarray_test
 
 import (
+  "errors"
+  "math"
+  "net"
   "strconv"
   "testing"
   "github.com/nokia/danm/pkg/bitarray"
 )
 
 var arraySizeTestConsts = []struct {
-  inputSize int
+  inputSize uint32
   isErrorExpected bool
-  expectedSize int
+  expectedSize uint32
 }{
-  {-1, true, 0},
-  {0, true, 0},
+  {0, false, 0},
   {1, false, 1},
   {33000, false, 33000},
 }
 
+var createBaFromNetTcs = []struct {
+  name string
+  subnet string
+  isErrorExpected bool
+  expectedSize uint32
+}{
+  {"maxIpV4", "10.0.0.0/9", false, uint32(math.Pow(2,float64(bitarray.MaxSupportedAllocLength)))},
+  {"minIpV4", "192.168.1.50/32", false, 1},
+  {"negativeIpV4", "192.168.1.50/33", false, 0},
+  {"overTheLimitIpV4", "10.0.0.0/8", true, 0},
+  {"maxIpV6", "2001:db8:85a3::8a2e:370:7334/105", false, uint32(math.Pow(2,float64(bitarray.MaxSupportedAllocLength)))},
+  {"minIpV6", "2001:db8:85a3::8a2e:370:7334/128", false, 1},
+  {"overTheLimitIpV6", "2001:db8:85a3::8a2e:370:7334/104", true, 0},  
+}
+
 func TestNewBitArray(t *testing.T) {
   for _, tt := range arraySizeTestConsts {
-    t.Run("TestNewBitArray Size:"+strconv.Itoa(tt.inputSize), func(t *testing.T) {
-      testArray,error := bitarray.NewBitArray(tt.inputSize)
-      if (tt.isErrorExpected && nil==error) && (!tt.isErrorExpected && nil!=error) {
-        t.Errorf("BitArray initialization returned unexpected error result at test value %d: error expected %t, returned error %s", tt.inputSize, tt.isErrorExpected, error )
-      }
-      if tt.isErrorExpected  {
-        return
-      }
-      actualSize := testArray.Len()
-      if actualSize != tt.expectedSize {
-        t.Errorf("BitArray returned unexpected size at test value %d: expected size %d, actual size %d", tt.inputSize, tt.expectedSize, actualSize)
+    t.Run("TestNewBitArray Size:"+strconv.Itoa(int(tt.inputSize)), func(t *testing.T) {
+      testArray, newErr := bitarray.NewBitArray(tt.inputSize)
+      err := evalBa(tt.isErrorExpected, newErr, tt.expectedSize, testArray)
+      if err != nil {
+        t.Errorf(err.Error())
       }
     })
   }
@@ -62,4 +73,31 @@ func TestBitArrayFunctionality(t *testing.T) {
       t.Errorf("Resetting did not work for number:%d", position)
     }
   }
+}
+
+func TestCreateBitArrayFromIpnet(t *testing.T) {
+  for _, tc := range createBaFromNetTcs {
+    t.Run(tc.name, func(t *testing.T) {
+      _, subnet, _ := net.ParseCIDR(tc.subnet)
+      ba, newErr := bitarray.CreateBitArrayFromIpnet(subnet)
+      err := evalBa(tc.isErrorExpected, newErr, tc.expectedSize, ba)
+      if err != nil {
+        t.Errorf(err.Error())
+      }
+    })
+  }
+}
+
+func evalBa(isErrorExpected bool, err error, expSize uint32, testArray *bitarray.BitArray) error {
+  if (isErrorExpected && nil==err) && (!isErrorExpected && nil!=err) {
+    return errors.New("BitArray initialization returned unexpected error result at test value " + strconv.Itoa(int(expSize)) + ": error expected: " + strconv.FormatBool(isErrorExpected) + ", returned error" + err.Error())
+  }
+  if isErrorExpected {
+    return nil
+  }
+  actualSize := testArray.Len()
+  if actualSize != expSize {
+    return errors.New("BitArray returned unexpected size: " + strconv.Itoa(int(actualSize)) + ", expected size was:"+ strconv.Itoa(int(expSize)))
+  }
+  return nil
 }

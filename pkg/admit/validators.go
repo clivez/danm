@@ -4,10 +4,10 @@ import (
   "errors"
   "net"
   "strconv"
-  "encoding/binary"
   admissionv1 "k8s.io/api/admission/v1beta1"
   danmtypes "github.com/nokia/danm/crd/apis/danm/v1"
   danmclientset "github.com/nokia/danm/crd/client/clientset/versioned"
+  "github.com/nokia/danm/pkg/datastructs"
   "github.com/nokia/danm/pkg/danmep"
   "github.com/nokia/danm/pkg/ipam"
   "k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
@@ -15,13 +15,12 @@ import (
 
 const (
   MaxNidLength = 11
-  MaxNetMaskLength = 8
 )
 
 var (
-  DanmNetMapping = []ValidatorFunc{validateIpv4Fields,validateIpv6Fields,validateAllocationPool,validateVids,validateNetworkId,validateAbsenceOfAllowedTenants,validateNeType,validateVniChange}
-  ClusterNetMapping = []ValidatorFunc{validateIpv4Fields,validateIpv6Fields,validateAllocationPool,validateVids,validateNetworkId,validateNeType,validateVniChange}
-  TenantNetMapping = []ValidatorFunc{validateIpv4Fields,validateIpv6Fields,validateAllocationPool,validateAbsenceOfAllowedTenants,validateTenantNetRules,validateNeType}
+  DanmNetMapping = []ValidatorFunc{validateIpv4Fields,validateIpv6Fields,validateAllocationPools,validateVids,validateNetworkId,validateAbsenceOfAllowedTenants,validateNeType,validateVniChange}
+  ClusterNetMapping = []ValidatorFunc{validateIpv4Fields,validateIpv6Fields,validateAllocationPools,validateVids,validateNetworkId,validateNeType,validateVniChange}
+  TenantNetMapping = []ValidatorFunc{validateIpv4Fields,validateIpv6Fields,validateAllocationPools,validateAbsenceOfAllowedTenants,validateTenantNetRules,validateNeType}
   danmValidationConfig = map[string]ValidatorMapping {
     "DanmNet": DanmNetMapping,
     "ClusterNetwork": ClusterNetMapping,
@@ -51,12 +50,6 @@ func validateIpFields(cidr string, routes map[string]string) error {
   if err != nil {
     return errors.New("Invalid CIDR: " + cidr)
   }
-  if ipnet.IP.To4() != nil {
-    ones, _ := ipnet.Mask.Size()
-    if ones < MaxNetMaskLength {
-      return errors.New("Netmask of the IPv4 CIDR is bigger than the maximum allowed /"+ strconv.Itoa(MaxNetMaskLength))
-    }
-  }
   for _, gw := range routes {
     if !ipnet.Contains(net.ParseIP(gw)) {
       return errors.New("Specified GW address:" + gw + " is not part of CIDR:" + cidr)
@@ -65,26 +58,42 @@ func validateIpFields(cidr string, routes map[string]string) error {
   return nil
 }
 
-func validateAllocationPool(oldManifest, newManifest *danmtypes.DanmNet, opType admissionv1.Operation, client danmclientset.Interface) error {
-  if opType == admissionv1.Create && newManifest.Spec.Options.Alloc != "" {
-    return errors.New("Allocation bitmask shall not be manually defined upon creation!")
+func validateAllocationPools(oldManifest, newManifest *danmtypes.DanmNet, opType admissionv1.Operation, client danmclientset.Interface) error {
+  if opType == admissionv1.Create &&
+     (newManifest.Spec.Options.Alloc != "" || newManifest.Spec.Options.Alloc6 != "") {
+    return errors.New("Allocation bitmasks shall not be manually defined upon creation!")
   }
-  cidr := newManifest.Spec.Options.Cidr
-  if cidr == "" {
+  err := validateAllocV4(newManifest)
+  if err != nil {
+    return err
+  }
+  err = validateAllocV6(newManifest)
+  if err != nil {
+    return err
+  }
+  return nil
+}
+
+func validateAllocV4(newManifest *danmtypes.DanmNet) error {
+  cidrV4 := newManifest.Spec.Options.Cidr
+  if cidrV4 == "" {
     if newManifest.Spec.Options.Pool.Start != "" || newManifest.Spec.Options.Pool.End != "" {
-      return errors.New("Allocation pool cannot be defined without CIDR!")
+      return errors.New("V4 Allocation pool cannot be defined without CIDR!")
     }
     return nil
   }
-  _, ipnet, _ := net.ParseCIDR(cidr)
-  if newManifest.Spec.Options.Pool.Start == "" {
-    newManifest.Spec.Options.Pool.Start = (ipam.Int2ip(ipam.Ip2int(ipnet.IP) + 1)).String()
+  _, ipnet, _ := net.ParseCIDR(cidrV4)
+  if ipnet.IP.To4() == nil {
+    return errors.New("Options.CIDR is not a valid V4 subnet!")
   }
-  if newManifest.Spec.Options.Pool.End == "" {
-    newManifest.Spec.Options.Pool.End = (ipam.Int2ip(ipam.Ip2int(GetBroadcastAddress(ipnet)) - 1)).String()
+  netMaskSize, _ := ipnet.Mask.Size()
+  if netMaskSize < datastructs.MaxV4MaskLength {
+    return errors.New("Netmask of the IPv4 CIDR is bigger than the maximum allowed /"+ strconv.Itoa(datastructs.MaxV4MaskLength))
   }
+  newManifest.Spec.Options.Pool.Start, newManifest.Spec.Options.Pool.End, newManifest.Spec.Options.Alloc =
+    ipam.InitAllocPool(newManifest.Spec.Options.Cidr, newManifest.Spec.Options.Pool.Start, newManifest.Spec.Options.Pool.End, newManifest.Spec.Options.Alloc, newManifest.Spec.Options.Routes)
   if !ipnet.Contains(net.ParseIP(newManifest.Spec.Options.Pool.Start)) || !ipnet.Contains(net.ParseIP(newManifest.Spec.Options.Pool.End)) {
-    return errors.New("Allocation pool is outside of defined CIDR")
+    return errors.New("Allocation pool is outside of defined CIDR!")
   }
   if ipam.Ip2int(net.ParseIP(newManifest.Spec.Options.Pool.End)) <= ipam.Ip2int(net.ParseIP(newManifest.Spec.Options.Pool.Start)) {
     return errors.New("Allocation pool start:" + newManifest.Spec.Options.Pool.Start + " is bigger than or equal to allocation pool end:" + newManifest.Spec.Options.Pool.End)
@@ -92,15 +101,52 @@ func validateAllocationPool(oldManifest, newManifest *danmtypes.DanmNet, opType 
   return nil
 }
 
-func GetBroadcastAddress(subnet *net.IPNet) (net.IP) {
-  ip := make(net.IP, len(subnet.IP.To4()))
-  //Don't ask
-  binary.BigEndian.PutUint32(ip, binary.BigEndian.Uint32(subnet.IP.To4())|^binary.BigEndian.Uint32(net.IP(subnet.Mask).To4()))
-  return ip
+func validateAllocV6(newManifest *danmtypes.DanmNet) error {
+  net6 := newManifest.Spec.Options.Net6
+  if net6 == "" {
+    if newManifest.Spec.Options.Pool6.Start != "" ||
+       newManifest.Spec.Options.Pool6.End   != "" ||
+       newManifest.Spec.Options.Pool6.Cidr  != "" {
+      return errors.New("IPv6 allocation pool cannot be defined without Net6!")
+    }
+    return nil
+  }
+  _, netCidr, _ := net.ParseCIDR(net6)
+  if netCidr.IP.To4() != nil {
+    return errors.New("spec.Options.Net6 is not a valid V6 subnet!")
+  }
+  // The limit of the current storage algorithm and etcd 3.4.X is ~8M addresses per network.
+  // This means that the summarized size of the IPv4, and IPv6 allocation pools shall not go over this threshold.
+  // Therefore we need to calculate the maximum usable prefix for our V6 pool, discounting the space we have already reserved for the V4 pool.
+  maxV6AllocPrefix := ipam.GetMaxUsableV6Prefix(newManifest)
+  ipam.InitV6PoolCidr(newManifest)
+  _, allocCidr, err := net.ParseCIDR(newManifest.Spec.Options.Pool6.Cidr)
+  if err != nil {
+    return errors.New("spec.Options.Pool6.CIDR is invalid!")
+  }
+  if allocCidr.IP.To4() != nil {
+    return errors.New("spec.Options.Allocation_Pool_V6.Cidr is not a valid V6 subnet!")
+  }
+  netMaskSize, _ := allocCidr.Mask.Size()
+  // We don't have enough storage space left for storing IPv6 allocations
+  if netMaskSize < maxV6AllocPrefix || netMaskSize == datastructs.MinV6PrefixLength {
+    return errors.New("The defined IPv6 allocation pool exceeds the maximum - 8M-size(IPv4 allocation pool) - storage capacity!")
+  }
+  if (newManifest.Spec.Options.Pool6.Start != "" && !allocCidr.Contains(net.ParseIP(newManifest.Spec.Options.Pool6.Start))) ||
+     (newManifest.Spec.Options.Pool6.End   != "" && !allocCidr.Contains(net.ParseIP(newManifest.Spec.Options.Pool6.End)))   ||
+     (!ipam.DoV6CidrsIntersect(netCidr, allocCidr)) {
+    return errors.New("IPv6 allocation pool is outside of the defined IPv6 subnet!")
+  }
+  newManifest.Spec.Options.Pool6.Start, newManifest.Spec.Options.Pool6.End, newManifest.Spec.Options.Alloc6 =
+    ipam.InitAllocPool(newManifest.Spec.Options.Pool6.Cidr, newManifest.Spec.Options.Pool6.Start, newManifest.Spec.Options.Pool6.End, newManifest.Spec.Options.Alloc6, newManifest.Spec.Options.Routes6)
+  if ipam.Ip62int(net.ParseIP(newManifest.Spec.Options.Pool6.End)).Cmp(ipam.Ip62int(net.ParseIP(newManifest.Spec.Options.Pool6.Start))) <=0 {
+    return errors.New("Allocation pool start:" + newManifest.Spec.Options.Pool6.Start + " is bigger than or equal to allocation pool end:" + newManifest.Spec.Options.Pool6.End)
+  }
+  return nil
 }
 
 func validateVids(oldManifest, newManifest *danmtypes.DanmNet, opType admissionv1.Operation, client danmclientset.Interface) error {
-  isVlanDefined := (newManifest.Spec.Options.Vlan!=0)
+  isVlanDefined  := (newManifest.Spec.Options.Vlan !=0)
   isVxlanDefined := (newManifest.Spec.Options.Vxlan!=0)
   if isVlanDefined && isVxlanDefined {
     return errors.New("VLAN ID and VxLAN ID parameters are mutually exclusive")
@@ -112,7 +158,8 @@ func validateNetworkId(oldManifest, newManifest *danmtypes.DanmNet, opType admis
   if newManifest.Spec.NetworkID == "" {
     return errors.New("Spec.NetworkID mandatory parameter is missing!")
   }
-  if len(newManifest.Spec.NetworkID) > MaxNidLength && IsTypeDynamic(newManifest.Spec.NetworkType) {
+  if len(newManifest.Spec.NetworkID) > MaxNidLength && IsTypeDynamic(newManifest.Spec.NetworkType) &&
+    (newManifest.Spec.Options.Vxlan != 0 || newManifest.Spec.Options.Vlan != 0) {
     return errors.New("Spec.NetworkID cannot be longer than " + strconv.Itoa(MaxNidLength) + " characters (otherwise VLAN and VxLAN host interface creation might fail)!")
   }
   return nil

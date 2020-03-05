@@ -389,7 +389,7 @@ func createDelegatedInterface(syncher *syncher.Syncher, danmClient danmclientset
 }
 
 func createDanmInterface(syncher *syncher.Syncher, danmClient danmclientset.Interface, iface datastructs.Interface, netInfo *danmtypes.DanmNet, args *cniArgs) {
-  ip4, ip6, macAddr, err := ipam.Reserve(danmClient, *netInfo, iface.Ip, iface.Ip6)
+  ip4, ip6, err := ipam.Reserve(danmClient, *netInfo, iface.Ip, iface.Ip6)
   if err != nil {
     syncher.PushResult(netInfo.ObjectMeta.Name, errors.New("IP address reservation failed for network:" + netInfo.ObjectMeta.Name + " with error:" + err.Error()), nil)
     return
@@ -401,7 +401,6 @@ func createDanmInterface(syncher *syncher.Syncher, danmClient danmclientset.Inte
     Name: cnidel.CalculateIfaceName(DanmConfig.NamingScheme, netInfo.Spec.Options.Prefix, iface.DefaultIfaceName, iface.SequenceId),
     Address:     ip4,
     AddressIPv6: ip6,
-    MacAddress:  macAddr,
     Proutes:     iface.Proutes,
     Proutes6:    iface.Proutes6,
   }
@@ -432,13 +431,9 @@ func createDanmInterface(syncher *syncher.Syncher, danmClient danmclientset.Inte
     return
   }
   danmResult := &current.Result{}
-  AddIfaceToResult(ep.Spec.EndpointID, epSpec.MacAddress, args.containerId, danmResult)
-  if (ip4 != "") {
-    AddIpToResult(ip4,"4",danmResult)
-  }
-  if (ip6 != "") {
-    AddIpToResult(ip6,"6",danmResult)
-  }
+  AddIfaceToResult(ep.Spec.EndpointID, args.containerId, danmResult)
+  AddIpToResult(ip4,"4",danmResult)
+  AddIpToResult(ip6,"6",danmResult)
   syncher.PushResult(netInfo.ObjectMeta.Name, nil, danmResult)
 }
 
@@ -484,17 +479,16 @@ func createDanmEp(epInput danmtypes.DanmEpIface, netInfo *danmtypes.DanmNet, arg
   return ep, nil
 }
 
-func AddIfaceToResult(epid string, macAddress string, sandBox string, cniResult *current.Result) {
+func AddIfaceToResult(epid string, sandBox string, cniResult *current.Result) {
   iface := &current.Interface{
     Name: epid,
-    Mac: macAddress,
     Sandbox: sandBox,
   }
   cniResult.Interfaces = append(cniResult.Interfaces, iface)
 }
 
 func AddIpToResult(ip string, version string, cniResult *current.Result) {
-  if ip != "" {
+  if ip != "" && ip != ipam.NoneAllocType {
     ip, _ := types.ParseCIDR(ip)
     ipConf := &current.IPConfig {
       Version: version,

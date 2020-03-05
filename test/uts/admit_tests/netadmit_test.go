@@ -125,6 +125,31 @@ var validateNetworkTcs = []struct {
   {"NotOkayToModifyDeviceDNet", "vniOld", "deviceNew", DnetType, v1beta1.Update, nil, matchDnet, true, nil, 0},
   {"NotOkayToModifyDeviceCNet", "vniOld", "deviceNew", CnetType, v1beta1.Update, nil, matchCnet, true, nil, 0},
   {"OkayToModifyRandomChangeCNet", "vniOld", "nidNew", CnetType, v1beta1.Update, nil, matchCnet, false, nil, 0},
+  {"Ipv6ProvidedAsCidrDNet", "", "v6-as-cidr", DnetType, "", nil, nil, true, nil, 0},
+  {"Ipv6ProvidedAsCidrTNet", "", "v6-as-cidr", TnetType, "", nil, nil, true, nil, 0},
+  {"Ipv6ProvidedAsCidrCNet", "", "v6-as-cidr", CnetType, "", nil, nil, true, nil, 0},
+  {"Ipv4ProvidedAsNet6DNet", "", "v4-as-net6", DnetType, "", nil, nil, true, nil, 0},
+  {"Ipv4ProvidedAsNet6TNet", "", "v4-as-net6", TnetType, "", nil, nil, true, nil, 0},
+  {"Ipv4ProvidedAsNet6CNet", "", "v4-as-net6", CnetType, "", nil, nil, true, nil, 0},
+  {"Ipv4ProvidedAsPool6CidrDNet", "", "v4-as-pool6", DnetType, "", nil, nil, true, nil, 0},
+  {"Ipv4ProvidedAsPool6CidrTNet", "", "v4-as-pool6", TnetType, "", nil, nil, true, nil, 0},
+  {"Ipv4ProvidedAsPool6CidrCNet", "", "v4-as-pool6", CnetType, "", nil, nil, true, nil, 0},
+  {"InvalidPool6CidrDNet", "", "invalid-pool6", DnetType, "", nil, nil, true, nil, 0},
+  {"InvalidPool6CidrTNet", "", "invalid-pool6", TnetType, "", nil, nil, true, nil, 0},
+  {"InvalidPool6CidrCNet", "", "invalid-pool6", CnetType, "", nil, nil, true, nil, 0},
+  {"Pool6CidrWithoutNet6DNet", "", "pool6-wo-net6", DnetType, "", nil, nil, true, nil, 0},
+  {"Pool6CidrWithoutNet6TNet", "", "pool6-wo-net6", TnetType, "", nil, nil, true, nil, 0},
+  {"Pool6CidrWithoutNet6CNet", "", "pool6-wo-net6", CnetType, "", nil, nil, true, nil, 0},
+  {"CreateBigV6NetworkWithoutPool6DNet", "", "big-net6-without-pool6", DnetType, v1beta1.Create, nil, nil, false, v6Allocs, 0},
+  {"CreateBigV6NetworkWithoutPool6TNet", "", "big-net6-without-pool6", TnetType, v1beta1.Create, randomDev, nil, false, v6AllocsForTnet, 1},
+  {"CreateBigV6NetworkWithoutPool6CNet", "", "big-net6-without-pool6", CnetType, v1beta1.Create, nil, nil, false, v6Allocs, 0},
+  {"CreateSmallV6NetworkWithoutPool6DNet", "", "small-net6-without-pool6", DnetType, v1beta1.Create, nil, nil, false, v6Allocs, 0},
+  {"CreateSmallV6NetworkWithoutPool6TNet", "", "small-net6-without-pool6", TnetType, v1beta1.Create, randomDev, nil, false, v6AllocsForTnet, 1},
+  {"CreateSmallV6NetworkWithoutPool6CNet", "", "small-net6-without-pool6", CnetType, v1beta1.Create, nil, nil, false, v6Allocs, 0},
+  {"V4PlusV6IsOverCapacity", "", "no-space-for-v6-alloc", DnetType, "", nil, nil, true, nil, 0},
+  {"Pool6CidrBiggerThanNet6", "", "pool6-cidr-outside-net6", DnetType, "", nil, nil, true, nil, 0},
+  {"InvalidPool6StartAddress", "", "invalid-pool6-start", DnetType, "", nil, nil, true, nil, 0},
+  {"Pool6StartAddressMatchesEnd", "", "pool6-end-equals-start", DnetType, "", nil, nil, true, nil, 0},
 }
 
 var (
@@ -198,19 +223,19 @@ var (
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "alloc-without-cidr"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Alloc: "gAAAAAAAAAAAAAAE", Pool: danmtypes.IP4Pool{Start: "192.168.1.1"}}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Alloc: "gAAAAAAAAAAAAAAE", Pool: danmtypes.IpPool{Start: "192.168.1.1"}}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "allocstart-outside-cidr"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool: danmtypes.IP4Pool{Start: "192.168.1.63"}, Cidr: "192.168.1.64/26"}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool: danmtypes.IpPool{Start: "192.168.1.63"}, Cidr: "192.168.1.64/26"}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "allocend-outside-cidr"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool: danmtypes.IP4Pool{End: "192.168.1.128"}, Cidr: "192.168.1.64/26"}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool: danmtypes.IpPool{End: "192.168.1.128"}, Cidr: "192.168.1.64/26"}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "no-free-ip"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool: danmtypes.IP4Pool{Start: "192.168.1.127", End: "192.168.1.127"}, Cidr: "192.168.1.64/26"}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool: danmtypes.IpPool{Start: "192.168.1.127", End: "192.168.1.127"}, Cidr: "192.168.1.64/26"}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "tnet-vlan"},
@@ -234,7 +259,7 @@ var (
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "no-netype-update"},
-      Spec: danmtypes.DanmNetSpec{NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Alloc: "gAAAAAE=", Pool: danmtypes.IP4Pool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26", Routes: map[string]string{"10.20.0.0/24": "192.168.1.64"}}},
+      Spec: danmtypes.DanmNetSpec{NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Alloc: "gAAAAAE=", Pool: danmtypes.IpPool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26", Routes: map[string]string{"10.20.0.0/24": "192.168.1.64"}}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "l2"},
@@ -246,23 +271,23 @@ var (
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "tnet-ens3"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Device: "ens3", Pool: danmtypes.IP4Pool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Device: "ens3", Pool: danmtypes.IpPool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "tnet-ens4"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Device: "ens4", Pool: danmtypes.IP4Pool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Device: "ens4", Pool: danmtypes.IpPool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "tnet-ens1f0"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "sriov", NetworkID: "e2", Options: danmtypes.DanmNetOption{DevicePool: "nokia.k8s.io/sriov_ens1f0", Pool: danmtypes.IP4Pool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "sriov", NetworkID: "e2", Options: danmtypes.DanmNetOption{DevicePool: "nokia.k8s.io/sriov_ens1f0", Pool: danmtypes.IpPool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "tnet-ens1f1"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "sriov", NetworkID: "e2", Options: danmtypes.DanmNetOption{DevicePool: "nokia.k8s.io/sriov_ens1f1", Pool: danmtypes.IP4Pool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "sriov", NetworkID: "e2", Options: danmtypes.DanmNetOption{DevicePool: "nokia.k8s.io/sriov_ens1f1", Pool: danmtypes.IpPool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "tnet-random"},
-      Spec: danmtypes.DanmNetSpec{NetworkType: "macvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool: danmtypes.IP4Pool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "macvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool: danmtypes.IpPool{Start: "192.168.1.65",End: "192.168.1.126"}, Cidr: "192.168.1.64/26"}},
     },
     danmtypes.DanmNet {
       ObjectMeta: meta_v1.ObjectMeta {Name: "flannel-with-name"},
@@ -304,6 +329,50 @@ var (
       ObjectMeta: meta_v1.ObjectMeta {Name: "nidNew", Namespace: "vni-test"},
       Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "e2", Options: danmtypes.DanmNetOption{Device: "ens4", Vlan: 50}},
     },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "v6-as-cidr"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Cidr: "2a00:8a00:a000:1193::/64"}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "v4-as-net6"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Net6: "192.168.1.0/24"}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "v4-as-pool6"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/64", Pool6: danmtypes.IpPoolV6{Cidr: "192.168.1.0/24"}}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "invalid-pool6"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/64", Pool6: danmtypes.IpPoolV6{Cidr: "2a00:8a00:a000:1193::/129"}}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "pool6-wo-net6"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Pool6: danmtypes.IpPoolV6{Cidr: "2a00:8a00:a000:1193::/64"}}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "big-net6-without-pool6"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Net6: "2a00:8a00:a000:1193::/64"}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "small-net6-without-pool6"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Net6: "2001:db8:85a3::8a2e:370:7334/120"}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "no-space-for-v6-alloc"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Cidr: "37.0.0.0/9", Net6: "2001:db8:85a3::8a2e:370:7334/105"}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "pool6-cidr-outside-net6"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Net6: "2001:db8:85a3::8a2e:370:7334/110", Pool6: danmtypes.IpPoolV6{Cidr: "2001:db8:85a3::8a2e:370:7334/109"}}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "invalid-pool6-start"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Net6: "2001:db8:85a3::8a2e:370:7334/108", Pool6: danmtypes.IpPoolV6{Cidr: "2001:db8:85a3::8a2e:370:7334/109", IpPool: danmtypes.IpPool{Start: "2001:db8:85a3::8a2e:370:734g"}}}},
+    },
+    danmtypes.DanmNet {
+      ObjectMeta: meta_v1.ObjectMeta {Name: "pool6-end-equals-start"},
+      Spec: danmtypes.DanmNetSpec{NetworkType: "ipvlan", NetworkID: "nanomsg", Options: danmtypes.DanmNetOption{Net6: "2001:db8:85a3::8a2e:370:7334/108", Pool6: danmtypes.IpPoolV6{Cidr: "2001:db8:85a3::8a2e:370:7334/109", IpPool: danmtypes.IpPool{Start: "2001:db8:85a3::8a2e:370:7340", End: "2001:db8:85a3::8a2e:370:7340"}}}},
+    },
   }
 )
 
@@ -336,6 +405,16 @@ var (
     admit.Patch {Path: "/spec/NetworkID"},
     admit.Patch {Path: "/spec/Options/host_device"},
     admit.Patch {Path: "/spec/Options/vxlan"},
+  }
+  v6Allocs = []admit.Patch {
+    admit.Patch {Path: "/spec/Options/alloc6"},
+    admit.Patch {Path: "/spec/Options/allocation_pool_v6"},
+  }
+  v6AllocsForTnet = []admit.Patch {
+    admit.Patch {Path: "/spec/Options/host_device"},
+    admit.Patch {Path: "/spec/Options/vxlan"},
+    admit.Patch {Path: "/spec/Options/alloc6"},
+    admit.Patch {Path: "/spec/Options/allocation_pool_v6"},
   }
 )
 
